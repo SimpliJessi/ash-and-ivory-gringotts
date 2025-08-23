@@ -19,6 +19,9 @@ from links import (
 )
 from vaults import set_vault_thread, get_vault_thread, unlink_vault_thread, post_receipt
 
+from dotenv import load_dotenv
+load_dotenv()  # loads variables from .env into process env
+
 # at the top of each file that writes JSON
 import os
 
@@ -37,10 +40,10 @@ PENDING_FILE = os.path.join(_BASE_DIR, "pending_receipts.json")
 # ---------------- CONFIG ----------------
 # Keep your token out of source code. Set an env var: setx DISCORD_BOT_TOKEN "YOUR_TOKEN"
 import os
+
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN env var not set.")
-bot.run(TOKEN)
 
 
 # Your server (guild-only sync = instant command availability)
