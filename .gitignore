@@ -1,0 +1,16 @@
+# Python cache / bytecode
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.env
+
+# Logs
+*.log
+
+# OS junk files
+.DS_Store
+Thumbs.db
+
+Bot Token.txt

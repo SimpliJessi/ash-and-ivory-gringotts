@@ -1,0 +1,127 @@
+{
+  "Hogsmeade": {
+    "Brood and Peck": {
+      "items": {
+        "Owl Treats (pack)": { "price_knuts": 348, "qty": null },
+        "Small Cage (standard)": { "price_knuts": 985, "qty": null },
+        "Exotic Owl": { "price_knuts": 2960, "qty": 6 },
+        "Pygmy Puff": { "price_knuts": 1235, "qty": 10 },
+        "Healing Salve for Owls": { "price_knuts": 290, "qty": null },
+        "Rare Magical Egg (mystery)": { "price_knuts": 4437, "qty": 3 }
+      }
+    },
+    "Dogweed and Deathcap": {
+      "items": {
+        "Shrivelfig": { "price_knuts": 174, "qty": 10 },
+        "Venomous Tentacula Seedling": { "price_knuts": 1479, "qty": 5 },
+        "Self-Watering Herb Pot": { "price_knuts": 1436, "qty": 5 },
+        "Mandrake Root (prepared)": { "price_knuts": 1709, "qty": 8 },
+        "Gillyweed (single portion)": { "price_knuts": 2217, "qty": 6 },
+        "Deathcap Mushroom (dried)": { "price_knuts": 522, "qty": 12 }
+      }
+    },
+    "Gladrags Wizardwear": {
+      "items": {
+        "Everyday Robes": { "price_knuts": 986, "qty": 10 },
+        "Color-Changing Scarf": { "price_knuts": 1339, "qty": 8 },
+        "Dress Robes": { "price_knuts": 2958, "qty": 5 },
+        "Glamour-Thread Gloves": { "price_knuts": 1449, "qty": 5 },
+        "Enchanted Socks (never match)": { "price_knuts": 435, "qty": 20 },
+        "Wizarding Hat with Animated Feather": { "price_knuts": 1479, "qty": 5 }
+      }
+    },
+    "Hog’s Head": {
+      "items": {
+        "Butterbeer (dusty bottle)": { "price_knuts": 145, "qty": null },
+        "Mulled Mead": { "price_knuts": 203, "qty": null },
+        "Firewhisky Shot": { "price_knuts": 986, "qty": null },
+        "Secretive Potion": { "price_knuts": 1972, "qty": 3 },
+        "Hog’s Head Stew": { "price_knuts": 348, "qty": 10 }
+      }
+    },
+    "Honeydukes": {
+      "items": {
+        "Chocolate Frog": { "price_knuts": 435, "qty": null },
+        "Bertie Bott’s Every Flavour Beans": { "price_knuts": 348, "qty": null },
+        "Fizzing Whizbees": { "price_knuts": 986, "qty": 20 },
+        "Acid Pops": { "price_knuts": 174, "qty": null },
+        "Sugar Quills": { "price_knuts": 116, "qty": null },
+        "Honeydukes Fudge Slab": { "price_knuts": 290, "qty": null }
+      }
+    },
+    "Magic Neep": {
+      "items": {
+        "Pumpkin (large)": { "price_knuts": 174, "qty": null },
+        "Fresh Carrots (bundle)": { "price_knuts": 58, "qty": null },
+        "Barrels of Butterbeer Ingredients": { "price_knuts": 1972, "qty": 3 },
+        "Cabbage (enchanted, lasts forever)": { "price_knuts": 2958, "qty": 2 },
+        "Magical Fertilizer": { "price_knuts": 1487, "qty": 8 }
+      }
+    },
+    "Ollivanders": {
+      "items": {
+        "Wand Polish Kit": { "price_knuts": 290, "qty": 20 },
+        "Practice Wand (spark)": { "price_knuts": 986, "qty": 10 },
+        "Repair Service": { "price_knuts": 1972, "qty": null },
+        "Wand Holster (enchanted)": { "price_knuts": 2958, "qty": 6 }
+      }
+    },
+    "Pippin’s Potions": {
+      "items": {
+        "Healing Potion (minor)": { "price_knuts": 1531, "qty": 10 },
+        "Antidote to Common Poisons": { "price_knuts": 1972, "qty": 8 },
+        "Invigoration Draught": { "price_knuts": 2465, "qty": 8 },
+        "Pepperup Potion": { "price_knuts": 348, "qty": 12 },
+        "Sleeping Draught": { "price_knuts": 986, "qty": 10 }
+      }
+    },
+    "The Three Broomsticks": {
+      "items": {
+        "Butterbeer (tankard)": { "price_knuts": 174, "qty": null },
+        "Mulled Mead": { "price_knuts": 986, "qty": null },
+        "Pumpkin Juice": { "price_knuts": 145, "qty": null },
+        "Shepherd’s Pie": { "price_knuts": 348, "qty": 10 },
+        "Seasonal Feast Platter": { "price_knuts": 2465, "qty": 5 }
+      }
+    },
+    "Tomes and Scrolls": {
+      "items": {
+        "Charms Compendium (intermediate)": { "price_knuts": 4820, "qty": 5 },
+        "Curses & Countercurses": { "price_knuts": 4930, "qty": 3 },
+        "Advanced Rune Workbook": { "price_knuts": 4437, "qty": 5 },
+        "Scroll of Defensive Charms": { "price_knuts": 2465, "qty": 7 },
+        "Blank Parchment Roll (enchanted, 20ft)": { "price_knuts": 986, "qty": 10 },
+        "Ink that Never Spills": { "price_knuts": 435, "qty": 12 }
+      }
+    },
+    "Tress Emporium": {
+      "items": {
+        "Glamour Dye (1-week color)": { "price_knuts": 1673, "qty": 8 },
+        "Sleekeazy’s Hair Potion": { "price_knuts": 1972, "qty": 5 },
+        "Curl-Locking Charm Brush": { "price_knuts": 2958, "qty": 5 },
+        "Enchanted Comb": { "price_knuts": 348, "qty": 10 },
+        "Perfumed Mist": { "price_knuts": 261, "qty": 12 }
+      }
+    },
+    "Spintwitches": {
+      "items": {
+        "Quaffle": { "price_knuts": 1972, "qty": 6 },
+        "Bludger (practice)": { "price_knuts": 3381, "qty": 4 },
+        "Beater’s Bat": { "price_knuts": 2958, "qty": 5 },
+        "Broom (Cleansweep 7)": { "price_knuts": 7888, "qty": 2 },
+        "Broom (Nimbus 2001)": { "price_knuts": 14790, "qty": 1 },
+        "Goggles (anti-rain)": { "price_knuts": 1354, "qty": 10 }
+      }
+    },
+    "Zonko’s Joke Shop": {
+      "items": {
+        "Dungbombs (pack of 5)": { "price_knuts": 290, "qty": 20 },
+        "Nose-Biting Teacup": { "price_knuts": 522, "qty": 10 },
+        "Extendable Ears": { "price_knuts": 1354, "qty": 8 },
+        "Trick Wands (snap loudly)": { "price_knuts": 290, "qty": 12 },
+        "Stink Pellets (pack of 10)": { "price_knuts": 232, "qty": 15 },
+        "Fanged Frisbee": { "price_knuts": 1531, "qty": 6 }
+      }
+    }
+  }
+}
