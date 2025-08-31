@@ -69,7 +69,7 @@ ALLOWED_CHANNEL_IDS: set[int] = {
 }
 
 # Channels for Gringotts Bank
-GRINGOTTS_FORUM_ID = 1406803792271249470  # test forum ID
+GRINGOTTS_FORUM_ID = 1393690306410450975  # test forum ID
 
 EARN_PER_MESSAGE = Money.from_str("7k")     # payout per qualifying message
 EARN_COOLDOWN_SECONDS = 15                  # cooldown PER CHARACTER
