@@ -36,8 +36,10 @@ DB_FILE = os.path.join(DATA_DIR, "balances.json")
 
 
 # ---------- Storage path ----------
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(_BASE_DIR, "character_links.json")
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "character_links.json")
+
 
 _lock = threading.Lock()
 

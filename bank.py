@@ -39,8 +39,10 @@ DB_FILE = os.path.join(DATA_DIR, "balances.json")
 
 
 # Put the DB next to this file (not dependent on cwd)
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(_BASE_DIR, "balances.json")
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "balances.json")
+
 
 _lock = threading.Lock()
 

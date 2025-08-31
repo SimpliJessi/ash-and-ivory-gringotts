@@ -15,8 +15,10 @@ DB_FILE = os.path.join(DATA_DIR, "balances.json")
 # character_links.json, shops.json, vaults.json, pending_receipts.json, etc. all the same way
 
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SHOPS_FILE = os.path.join(_BASE_DIR, "shops.json")
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "shops.json")
+
 
 # ---------------- Storage helpers ----------------
 def _load() -> dict:

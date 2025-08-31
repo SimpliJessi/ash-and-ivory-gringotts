@@ -1,4 +1,9 @@
 # bot.py
+import os
+
+from dotenv import load_dotenv
+load_dotenv()  # loads variables from .env into process env
+
 import os, time
 import discord
 import random
@@ -19,9 +24,6 @@ from links import (
 )
 from vaults import set_vault_thread, get_vault_thread, unlink_vault_thread, post_receipt
 
-from dotenv import load_dotenv
-load_dotenv()  # loads variables from .env into process env
-
 # at the top of each file that writes JSON
 import os
 
@@ -34,8 +36,10 @@ DB_FILE = os.path.join(DATA_DIR, "balances.json")
 
 
 # keep with your other _BASE_DIR usage
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PENDING_FILE = os.path.join(_BASE_DIR, "pending_receipts.json")
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
+
 
 # ---------------- CONFIG ----------------
 # Keep your token out of source code. Set an env var: setx DISCORD_BOT_TOKEN "YOUR_TOKEN"
