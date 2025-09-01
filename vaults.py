@@ -1,12 +1,18 @@
 # vaults.py
 from __future__ import annotations
-import os, json, tempfile, random
+import os, json, tempfile, random, threading
 from typing import Optional, Tuple, Dict
 import discord
 from currency import Money
 
 # at the top of each file that writes JSON
 import os
+
+_BASE_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(_BASE_DIR, exist_ok=True)
+
+VAULTS_FILE = os.path.join(_BASE_DIR, "vaults.json")
+_lock = threading.Lock()
 
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)

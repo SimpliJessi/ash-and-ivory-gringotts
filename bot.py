@@ -56,6 +56,7 @@ TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 
 # Channels where messages earn money (include forum PARENT channel IDs)
 ALLOWED_CHANNEL_IDS: set[int] = {
+    1398762545430401155, # Events
     1393688264531247277, # Hogwarts Grounds
     1393683936009257141, # Hogwarts Castle
     1393687041212153886, # Slytherin Common Room
@@ -63,8 +64,11 @@ ALLOWED_CHANNEL_IDS: set[int] = {
     1393687315162857493, # Ravenclaw Common Room
     1393687608684580874, # Hufflepuff Common Room
     1393689121666502666, # Hogsmeade Village
+    1411841740654248046, # Diagon Alley
+    1411841810371711037, # Knockturn Alley
     1407084037843189882, # The Highlands
     1393690088835125330, # Wizarding London
+    1409802777126768640, # Elsewhere
     1406803659202887862, # Chaos Testing Center
 }
 
@@ -73,7 +77,7 @@ GRINGOTTS_FORUM_ID = 1393690306410450975  # test forum ID
 
 EARN_PER_MESSAGE = Money.from_str("7k")     # payout per qualifying message
 EARN_COOLDOWN_SECONDS = 15                  # cooldown PER CHARACTER
-MIN_MESSAGE_LENGTH = 250                    # minimum characters to count
+MIN_MESSAGE_LENGTH = 500                    # minimum characters to count
 
 # Weekly pay (currently user-level, not per-character)
 ADULT_ROLE_NAME = "Adult"
