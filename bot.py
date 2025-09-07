@@ -73,10 +73,11 @@ TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 # ---------------- DEBUG (targeted, low-noise) ----------------
 # Only emit deep diagnostics for these channels/threads while troubleshooting.
 # Put your Events forum ID and/or the specific thread ID(s) here.
+# near other CONFIG
 DEBUG_EARNING_CHANNEL_IDS: set[int] = {
-    1398762545430401155,  # Events category/forum ID
-    1411901315185119252,  # Witch's Market
+    1411901315185119252,  # <-- this thread
 }
+
 
 def _debug_enabled_for(message: discord.Message) -> bool:
     ch = message.channel
