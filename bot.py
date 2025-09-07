@@ -151,6 +151,9 @@ IGNORED_WEBHOOK_NAMES: set[str] = {
     "Wizarding Cards",
 }
 
+# Bypass per-character cooldown in channels where debug is enabled (handy for testing)
+DEBUG_BYPASS_COOLDOWN = os.getenv("DEBUG_BYPASS_COOLDOWN", "0") == "1"
+
 # ---------------- DEBUG (targeted, low-noise) ----------------
 # Set DEBUG_EARN_ALL=1 to trace all webhook messages everywhere (very noisy).
 DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
@@ -384,7 +387,7 @@ async def on_message(message: discord.Message):
 
     dbg = _debug_enabled_for_channel(message.channel)
 
-    # HEARTBEAT (fires before any return). If DEBUG_EARN_ALL or channel is toggled, we log always.
+    # HEARTBEAT (always emit in traced channels)
     if dbg:
         logger.info(
             "debug:earn_heartbeat | "
@@ -414,13 +417,15 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Channel allowlist first
+    # Channel allowlist
     allowed, ch_details = is_earning_channel_with_details(message.channel)
     if not allowed:
         if dbg:
             logger.info(f"debug:earn_skip reason='channel_not_allowed' | {ch_details}")
         await bot.process_commands(message)
         return
+    elif dbg:
+        logger.info(f"debug:earn_check channel_allowed=True | {ch_details}")
 
     # Content length
     content = (message.content or "").strip()
@@ -452,9 +457,11 @@ async def on_message(message: discord.Message):
             )
         await bot.process_commands(message)
         return
+    elif dbg:
+        logger.info(f"debug:earn_check linked user_id={linked_uid} char_key='{char_key}'")
 
-    # Cooldown
-    if not can_payout(linked_uid, char_key):
+    # Cooldown (with optional bypass while debugging)
+    if not DEBUG_BYPASS_COOLDOWN and not can_payout(linked_uid, char_key):
         if dbg:
             logger.info(
                 "debug:earn_skip reason='cooldown' "
@@ -462,6 +469,8 @@ async def on_message(message: discord.Message):
             )
         await bot.process_commands(message)
         return
+    elif dbg and DEBUG_BYPASS_COOLDOWN:
+        logger.info("debug:earn_check cooldown_bypassed=True")
 
     # Success
     add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
@@ -473,6 +482,7 @@ async def on_message(message: discord.Message):
         )
 
     await bot.process_commands(message)
+
 
 
 # ---------------- SLASH COMMANDS ----------------
