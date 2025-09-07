@@ -173,11 +173,11 @@ STARTER_FUNDS = Money.from_str("50g")   # starting balance for a newly linked ch
 DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
 
 # Track channels/threads where we want deep diagnostics (toggle with /debug_toggle).
-DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # <-- must be set(), not {}
-
+# Track channels/threads where we want deep diagnostics:
+DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # must be set(), not {}
 
 def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
-    if DEBUG_EARN_ALL:
+    if os.getenv("DEBUG_EARN_ALL", "0") == "1":
         return True
     parent = getattr(ch, "parent", None)
     candidates = {
@@ -186,6 +186,7 @@ def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) ->
         getattr(parent, "id", None) if parent else None,
     }
     return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
+
 
 # ---------------- BOT SETUP ----------------
 intents = discord.Intents.default()
