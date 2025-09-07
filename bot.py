@@ -35,16 +35,59 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "balances.json")
 PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
 
-# ---------------- LOGGING BOOTSTRAP (safe & simple) ----------------
+# ---------------- LOGGING ----------------
+import logging, logging.handlers, os, re
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE  = os.getenv("LOG_FILE", "bot.log")
 
+# Optional: silence a noisy webhook by ID or name (Wizarding Cards example)
+SILENCE_WEBHOOK_IDS = {1130656856990289961}  # add/remove as needed
+SILENCE_WEBHOOK_NAMES = {"Wizarding Cards"}  # exact webhook author display name
+
+_WEBHOOK_ID_RE = re.compile(r"\bwebhook_id=(\d{5,})\b")
+_AUTHOR_RE     = re.compile(r"author='([^']+)'")  # matches our earn_trace author='...'
+
+class WebhookNoiseFilter(logging.Filter):
+    """
+    Drop only *our* records that explicitly mention a silenced webhook id or author.
+    We look for 'webhook_id=<id>' and "author='Name'" tokens to avoid substring accidents.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Only filter our app logger; never touch discord or root logs.
+        if not record.name.startswith("gringotts"):
+            return True
+
+        msg = record.getMessage()
+
+        # Match an exact webhook id token
+        m = _WEBHOOK_ID_RE.search(msg)
+        if m:
+            try:
+                wid = int(m.group(1))
+                if wid in SILENCE_WEBHOOK_IDS:
+                    return False
+            except ValueError:
+                pass
+
+        # Match explicit author token
+        m2 = _AUTHOR_RE.search(msg)
+        if m2 and m2.group(1) in SILENCE_WEBHOOK_NAMES:
+            return False
+
+        return True
+
 def setup_logging():
+    # Root logger: keep minimal setup so third-party libs aren't affected.
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
+    root.setLevel(logging.INFO)
+    root.addHandler(logging.StreamHandler())  # simple console for non-app logs
 
-    root.setLevel(logging.DEBUG)  # capture everything; handlers will gate
+    # Our app logger + handlers
+    app_logger = logging.getLogger("gringotts")
+    app_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s :: %(message)s",
@@ -54,25 +97,24 @@ def setup_logging():
     ch = logging.StreamHandler()
     ch.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
     ch.setFormatter(fmt)
+    ch.addFilter(WebhookNoiseFilter())
 
     fh = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
     )
     fh.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
     fh.setFormatter(fmt)
+    fh.addFilter(WebhookNoiseFilter())
 
-    root.addHandler(ch)
-    root.addHandler(fh)
+    # Clear existing handlers on the app logger to avoid duplicates
+    for h in list(app_logger.handlers):
+        app_logger.removeHandler(h)
 
-    app_logger = logging.getLogger("gringotts")
-    app_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-    app_logger.propagate = True
+    app_logger.addHandler(ch)
+    app_logger.addHandler(fh)
 
 setup_logging()
 logger = logging.getLogger("gringotts")
-
-# Optional: heartbeat toggle to prove on_message is firing
-DEBUG_EARN_HEARTBEAT = os.getenv("DEBUG_EARN_HEARTBEAT", "0") == "1"
 
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
