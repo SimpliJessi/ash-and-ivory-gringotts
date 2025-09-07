@@ -487,6 +487,67 @@ async def on_message(message: discord.Message):
 
 
 # ---------------- SLASH COMMANDS ----------------
+# --- Staff: withdraw from a character vault ---
+@bot.tree.command(
+    name="vault_withdraw",
+    description="(Staff) Withdraw funds from a character's vault and post a receipt."
+)
+@app_commands.guilds(TEST_GUILD)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    character="Character display name",
+    amount="Amount to withdraw, e.g., 2g 5s or 30s",
+    note="Reason/note to include on the receipt (shown in the Vault)"
+)
+async def vault_withdraw_cmd(
+    interaction: discord.Interaction,
+    character: str,
+    amount: str,
+    note: str | None = None
+):
+    uid = resolve_character(character)
+    if not uid:
+        await interaction.response.send_message(f"❌ No link for **{character}**.", ephemeral=True)
+        return
+
+    key = normalize_display_name(character)
+
+    try:
+        m = Money.from_str(amount)
+    except Exception:
+        await interaction.response.send_message(
+            "❌ Amount format not recognized. Try `2g 5s`, `15s`, or `300k`.",
+            ephemeral=True
+        )
+        return
+
+    if m.knuts <= 0:
+        await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
+        return
+
+    reason = note.strip() if (note and note.strip()) else "Staff Withdrawal"
+
+    ok = await withdraw_from_character(
+        interaction.guild,  # interaction_or_guild
+        interaction.guild,  # guild
+        uid,
+        key,
+        m,
+        reason=reason
+    )
+    if not ok:
+        bal = get_balance(uid, key=key)
+        await interaction.response.send_message(
+            f"❌ Insufficient funds. {character} balance: **{bal.pretty_long()}**.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"🏦 Withdrew **{m.pretty_long()}** from **{character}**. Note: _{reason}_",
+        ephemeral=True
+    )
+
 @bot.tree.command(name="debug_toggle", description="(Staff) Toggle earn debug tracing for this channel/thread.")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -888,21 +949,49 @@ async def leaderboard_cmd(interaction: discord.Interaction, scope: str = "users"
 @bot.tree.command(name="award_character", description="Award a character (staff only).")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(character="Character display name", amount="e.g., 2g 5s")
-async def award_character_cmd(interaction: discord.Interaction, character: str, amount: str):
+@app_commands.describe(
+    character="Character display name",
+    amount="e.g., 2g 5s",
+    note="Optional note for the receipt (defaults to 'Staff Reward')"
+)
+async def award_character_cmd(
+    interaction: discord.Interaction,
+    character: str,
+    amount: str,
+    note: str | None = None
+):
     uid = resolve_character(character)
     if not uid:
         await interaction.response.send_message(f"❌ No link for **{character}**.", ephemeral=True)
         return
+
     key = normalize_display_name(character)
+
     try:
         money = Money.from_str(amount)
     except Exception:
-        await interaction.response.send_message("❌ Amount format not recognized. Try `2g 5s`, `15s`, or `300k`.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Amount format not recognized. Try `2g 5s`, `15s`, or `300k`.",
+            ephemeral=True
+        )
         return
-    # Deposit ONCE (and post immediate receipt)
-    await deposit_to_character(interaction.guild, interaction.guild, uid, key, money, reason="Staff award")
-    await interaction.response.send_message(f"✅ Awarded **{money.pretty_long()}** to **{character}**.")
+
+    reason = note.strip() if (note and note.strip()) else "Staff Reward"
+
+    await deposit_to_character(
+        interaction.guild,  # interaction_or_guild
+        interaction.guild,  # guild
+        uid,
+        key,
+        money,
+        reason=reason
+    )
+
+    await interaction.response.send_message(
+        f"✅ Awarded **{money.pretty_long()}** to **{character}**. Note: _{reason}_",
+        ephemeral=True
+    )
+
 
 # Creates a Vault
 @bot.tree.command(name="vault_create", description="Create a Gringotts Vault thread for a character.")
