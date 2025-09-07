@@ -12,6 +12,9 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 
+import logging
+logger = logging.getLogger("gringotts")
+
 from discord import app_commands
 from discord.ext import commands, tasks
 from currency import Money
@@ -67,9 +70,28 @@ if not TOKEN:
 TEST_GUILD_ID = 1393623189241991168
 TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 
+# ---------------- DEBUG (targeted, low-noise) ----------------
+# Only emit deep diagnostics for these channels/threads while troubleshooting.
+# Put your Events forum ID and/or the specific thread ID(s) here.
+DEBUG_EARNING_CHANNEL_IDS: set[int] = {
+    1398762545430401155,  # Events category/forum ID
+    1411901315185119252,  # Witch's Market
+}
+
+def _debug_enabled_for(message: discord.Message) -> bool:
+    ch = message.channel
+    parent = getattr(ch, "parent", None)
+    candidates = {
+        getattr(ch, "id", None),
+        getattr(ch, "parent_id", None),
+        getattr(parent, "id", None),
+    }
+    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
+
+
 # Channels where messages earn money (include forum PARENT channel IDs)
 ALLOWED_CHANNEL_IDS: set[int] = {
-    1411901315185119252, # Witche's Market
+    1411901315185119252, # Witch's Market
     1393688264531247277, # Hogwarts Grounds
     1393683936009257141, # Hogwarts Castle
     1393687041212153886, # Slytherin Common Room
@@ -243,6 +265,40 @@ def queue_rp_earning(guild_id: int, user_id: int, char_key: str, delta_knuts: in
 
     _pending_save_atomic(data)
 
+def is_earning_channel_with_details(message: discord.Message) -> tuple[bool, dict]:
+    """Return (allowed?, details) showing exactly what we checked."""
+    ch = message.channel  # TextChannel, Thread, or ForumChannel
+    ids_to_check: list[int] = []
+
+    ids_to_check.append(getattr(ch, "id", None))
+    ids_to_check.append(getattr(ch, "parent_id", None))
+    ids_to_check.append(getattr(ch, "category_id", None))
+
+    parent = getattr(ch, "parent", None)
+    if parent is not None:
+        ids_to_check.append(getattr(parent, "id", None))
+        ids_to_check.append(getattr(parent, "parent_id", None))
+        ids_to_check.append(getattr(parent, "category_id", None))
+
+    ids_to_check = [cid for cid in ids_to_check if cid]
+
+    matched = [cid for cid in ids_to_check if cid in ALLOWED_CHANNEL_IDS]
+    allowed = bool(matched)
+
+    details = {
+        "channel_type": type(ch).__name__,
+        "channel_id": getattr(ch, "id", None),
+        "parent_id": getattr(ch, "parent_id", None),
+        "category_id": getattr(ch, "category_id", None),
+        "parent_type": type(parent).__name__ if parent else None,
+        "parent_category_id": getattr(parent, "category_id", None) if parent else None,
+        "ids_checked": ids_to_check,
+        "ids_matched": matched,
+        "allowed": allowed,
+    }
+    return allowed, details
+
+
 def is_earning_channel(message: discord.Message) -> bool:
     """Allow by channel ID, its parent (e.g., forum or text channel), or their category."""
     ch = message.channel  # can be TextChannel, ForumChannel, Thread, etc.
@@ -334,49 +390,90 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Hard-ignore specific utility webhooks (optional)
+    # Optional: hard-ignore utility webhooks
     if message.webhook_id in IGNORED_WEBHOOK_IDS or (message.author.name or "") in IGNORED_WEBHOOK_NAMES:
         await bot.process_commands(message)
         return
 
-    # EARLY FILTER: channel allowlist first (avoid logging/link lookups outside RP areas)
-    if not is_earning_channel(message):
+    # --- Targeted debug snapshot (computed once) ---
+    dbg = _debug_enabled_for(message)
+    dbg_fields = {
+        "guild_id": getattr(message.guild, "id", None),
+        "message_id": message.id,
+        "author_id": message.author.id,
+        "author_name": message.author.name,
+        "webhook_id": message.webhook_id,
+        "channel_id": getattr(message.channel, "id", None),
+        "channel_name": getattr(message.channel, "name", None),
+        "parent_id": getattr(message.channel, "parent_id", None),
+        "category_id": getattr(message.channel, "category_id", None),
+        "is_thread": isinstance(message.channel, discord.Thread),
+        "content_len": len((message.content or "").strip()),
+    }
+
+    # EARLY: channel allowlist
+    allowed, ch_details = is_earning_channel_with_details(message)
+    if not allowed:
+        if dbg:
+            logger.info(f"debug:earn_skip reason='channel_not_allowed' | {dbg_fields} | {ch_details}")
         await bot.process_commands(message)
         return
 
-    # EARLY FILTER: content length before anything else to avoid noise for empty utility posts
+    # EARLY: content length
     content = (message.content or "").strip()
     if len(content) < MIN_MESSAGE_LENGTH:
+        if dbg:
+            logger.info(f"debug:earn_skip reason='too_short' min={MIN_MESSAGE_LENGTH} | {dbg_fields}")
         await bot.process_commands(message)
         return
 
-    # Now derive character and owner (only for messages that *could* earn)
+    # Character resolution (only now, since it might be expensive)
     raw_name = message.author.name or ""
     char_key = normalize_display_name(raw_name)
     linked_uid = resolve_character(raw_name)
     if not linked_uid:
-        # Silent skip; if you really want visibility, downgrade to DEBUG-level logging in your logger.
-        # logger.debug(f"skip:unlinked_character name='{raw_name}' char_key='{char_key}' ...")
+        if dbg:
+            logger.info(f"debug:earn_skip reason='unlinked_character' name='{raw_name}' char_key='{char_key}' | {dbg_fields}")
         await bot.process_commands(message)
         return
 
-    # Per-user+character cooldown
+    # Cooldown per (user, char)
     if not can_payout(linked_uid, char_key):
+        if dbg:
+            logger.info(f"debug:earn_skip reason='cooldown' cooldown_s={EARN_COOLDOWN_SECONDS} | {dbg_fields} | {{'user_id': {linked_uid}, 'char_key': '{char_key}'}}")
         await bot.process_commands(message)
         return
 
-    # Credit immediately (so balances stay current)...
+    # Success path
     add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
-    # ...and queue the receipt for the daily UTC summary
     queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
 
-    print(f"[EARN] +{EARN_PER_MESSAGE.pretty_long()} -> {linked_uid}:{char_key} (queued for daily receipt)")
+    if dbg:
+        logger.info(f"debug:earn_ok delta='{EARN_PER_MESSAGE.pretty_long()}' | {dbg_fields} | {{'user_id': {linked_uid}, 'char_key': '{char_key}'}}")
 
     await bot.process_commands(message)
 
 
 # ---------------- SLASH COMMANDS ----------------
 from discord import app_commands
+
+@bot.tree.command(name="debug_channel", description="(Staff) Explain why this channel/thread is or isn't allowed for RP earnings.")
+@app_commands.guilds(TEST_GUILD)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def debug_channel_cmd(interaction: discord.Interaction):
+    allowed, details = is_earning_channel_with_details(interaction.channel)
+    lines = [
+        f"**Allowed:** {allowed}",
+        f"Channel type: `{details['channel_type']}`  (id: `{details['channel_id']}`)",
+        f"Parent type: `{details['parent_type']}`  (id: `{details['parent_id']}`)",
+        f"Category id: `{details['category_id']}`",
+        f"Parent category id: `{details['parent_category_id']}`",
+        f"Checked IDs: `{details['ids_checked']}`",
+        f"Matched IDs: `{details['ids_matched']}`",
+        f"Configured ALLOW list size: `{len(ALLOWED_CHANNEL_IDS)}`",
+    ]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
 
 @bot.tree.command(name="hello", description="Test command to verify sync.")
 @app_commands.guilds(TEST_GUILD)
