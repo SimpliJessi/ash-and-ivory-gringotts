@@ -151,6 +151,25 @@ IGNORED_WEBHOOK_NAMES: set[str] = {
     "Wizarding Cards",
 }
 
+# ---------------- DEBUG (targeted, low-noise) ----------------
+# Set DEBUG_EARN_ALL=1 to trace all webhook messages everywhere (very noisy).
+DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
+
+# Channels/threads where we want deep diagnostics: toggle with /debug_toggle
+DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # MUST be set(), not {}
+
+def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
+    if DEBUG_EARN_ALL:
+        return True
+    parent = getattr(ch, "parent", None)
+    candidates = {
+        getattr(ch, "id", None),
+        getattr(ch, "parent_id", None),
+        getattr(parent, "id", None) if parent else None,
+    }
+    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
+
+
 # Channels for Gringotts Bank
 GRINGOTTS_FORUM_ID = 1393690306410450975  # test forum ID
 
@@ -363,35 +382,35 @@ async def on_message(message: discord.Message):
     if message.author.id == bot.user.id:
         return
 
-    # HEARTBEAT: prove we see webhook messages *before* any early returns.
-    if DEBUG_EARN_HEARTBEAT and message.webhook_id:
-        logger.info("hb:on_message ch=%s parent=%s webhook=%s len=%s",
-                    getattr(message.channel, 'id', None),
-                    getattr(message.channel, 'parent_id', None),
-                    message.webhook_id,
-                    len((message.content or '').strip()))
+    dbg = _debug_enabled_for_channel(message.channel)
+
+    # HEARTBEAT (fires before any return). If DEBUG_EARN_ALL or channel is toggled, we log always.
+    if dbg:
+        logger.info(
+            "debug:earn_heartbeat | "
+            f"guild_id={getattr(message.guild, 'id', None)} "
+            f"message_id={getattr(message, 'id', None)} "
+            f"webhook_id={getattr(message, 'webhook_id', None)} "
+            f"author='{getattr(message.author, 'name', None)}' "
+            f"channel_id={getattr(message.channel, 'id', None)} "
+            f"parent_id={getattr(message.channel, 'parent_id', None)} "
+            f"len={len((getattr(message, 'content', '') or '').strip())}"
+        )
 
     # Only award for proxied/webhook messages (Tupperbox etc.)
     if not message.webhook_id:
+        if dbg:
+            logger.info("debug:earn_skip reason='not_webhook'")
         await bot.process_commands(message)
         return
 
-    # Is this channel/thread under debug?
-    dbg = _debug_enabled_for_channel(message.channel)
-    if dbg:
-        logger.info(
-            "debug:earn_trace entry | "
-            f"guild_id={getattr(message.guild, 'id', None)} message_id={message.id} "
-            f"webhook_id={message.webhook_id} author='{message.author.name}' "
-            f"channel_id={getattr(message.channel, 'id', None)} "
-            f"parent_id={getattr(message.channel, 'parent_id', None)} "
-            f"len={len((message.content or '').strip())}"
-        )
-
-    # Hard-ignore utility webhooks
+    # Optional: hard-ignore utility webhooks
     if message.webhook_id in IGNORED_WEBHOOK_IDS or (message.author.name or "") in IGNORED_WEBHOOK_NAMES:
         if dbg:
-            logger.info("debug:earn_skip reason='ignored_webhook'")
+            logger.info(
+                "debug:earn_skip reason='ignored_webhook' | "
+                f"webhook_id={message.webhook_id} author='{message.author.name}'"
+            )
         await bot.process_commands(message)
         return
 
@@ -407,24 +426,40 @@ async def on_message(message: discord.Message):
     content = (message.content or "").strip()
     if len(content) < MIN_MESSAGE_LENGTH:
         if dbg:
-            logger.info(f"debug:earn_skip reason='too_short' min={MIN_MESSAGE_LENGTH} actual={len(content)}")
+            logger.info(
+                "debug:earn_skip reason='too_short' "
+                f"min={MIN_MESSAGE_LENGTH} actual={len(content)}"
+            )
         await bot.process_commands(message)
         return
 
     # Character resolution
     raw_name = message.author.name or ""
-    char_key = normalize_display_name(raw_name)
-    linked_uid = resolve_character(raw_name)
+    try:
+        char_key = normalize_display_name(raw_name)
+        linked_uid = resolve_character(raw_name)
+    except Exception as e:
+        if dbg:
+            logger.exception(f"debug:earn_skip reason='normalize_or_resolve_exception' name='{raw_name}'")
+        await bot.process_commands(message)
+        return
+
     if not linked_uid:
         if dbg:
-            logger.info(f"debug:earn_skip reason='unlinked_character' name='{raw_name}' char_key='{char_key}'")
+            logger.info(
+                "debug:earn_skip reason='unlinked_character' "
+                f"name='{raw_name}' char_key='{char_key}'"
+            )
         await bot.process_commands(message)
         return
 
     # Cooldown
     if not can_payout(linked_uid, char_key):
         if dbg:
-            logger.info(f"debug:earn_skip reason='cooldown' cooldown_s={EARN_COOLDOWN_SECONDS} user_id={linked_uid} char_key='{char_key}'")
+            logger.info(
+                "debug:earn_skip reason='cooldown' "
+                f"cooldown_s={EARN_COOLDOWN_SECONDS} user_id={linked_uid} char_key='{char_key}'"
+            )
         await bot.process_commands(message)
         return
 
@@ -432,9 +467,13 @@ async def on_message(message: discord.Message):
     add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
     queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
     if dbg:
-        logger.info(f"debug:earn_ok delta='{EARN_PER_MESSAGE.pretty_long()}' user_id={linked_uid} char_key='{char_key}'")
+        logger.info(
+            "debug:earn_ok "
+            f"delta='{EARN_PER_MESSAGE.pretty_long()}' user_id={linked_uid} char_key='{char_key}'"
+        )
 
     await bot.process_commands(message)
+
 
 # ---------------- SLASH COMMANDS ----------------
 @bot.tree.command(name="debug_toggle", description="(Staff) Toggle earn debug tracing for this channel/thread.")
@@ -443,12 +482,38 @@ async def on_message(message: discord.Message):
 async def debug_toggle_cmd(interaction: discord.Interaction):
     ch = interaction.channel
     cid = getattr(ch, "id", None)
+    if cid is None:
+        await interaction.response.send_message("This place has no channel ID? 🤔", ephemeral=True)
+        return
     if cid in DEBUG_EARNING_CHANNEL_IDS:
         DEBUG_EARNING_CHANNEL_IDS.remove(cid)
         await interaction.response.send_message(f"🔇 Debug OFF for <#{cid}>", ephemeral=True)
     else:
         DEBUG_EARNING_CHANNEL_IDS.add(cid)
         await interaction.response.send_message(f"🔊 Debug ON for <#{cid}>", ephemeral=True)
+
+@bot.tree.command(name="debug_status", description="(Staff) Show earn-debug status for this channel/thread.")
+@app_commands.guilds(TEST_GUILD)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def debug_status_cmd(interaction: discord.Interaction):
+    ch = interaction.channel
+    parent = getattr(ch, "parent", None)
+    cids = [
+        ("this", getattr(ch, "id", None)),
+        ("parent", getattr(ch, "parent_id", None)),
+        ("parent.id", getattr(parent, "id", None) if parent else None),
+    ]
+    enabled = _debug_enabled_for_channel(ch)
+    await interaction.response.send_message(
+        "Earn-debug status:\n"
+        f"- DEBUG_EARN_ALL: `{DEBUG_EARN_ALL}`\n"
+        f"- Channel IDs considered: `{[x for (_n, x) in cids]}`\n"
+        f"- Tracing enabled here: `{enabled}`\n"
+        f"- Currently traced IDs: `{sorted(list(DEBUG_EARNING_CHANNEL_IDS))}`\n"
+        f"- LOG_LEVEL: `{os.getenv('LOG_LEVEL', 'INFO')}`\n",
+        ephemeral=True
+    )
+
 
 @bot.tree.command(name="debug_channel", description="(Staff) Explain why this channel/thread is or isn't allowed for RP earnings.")
 @app_commands.guilds(TEST_GUILD)
