@@ -1,22 +1,21 @@
 # bot.py
 import os
-
 from dotenv import load_dotenv
 load_dotenv()  # loads variables from .env into process env
 
-import os, time
+import time
 import discord
 import random
 import datetime
 import json
 import logging
+import logging.handlers
 from logging.handlers import RotatingFileHandler
-
-import logging
-logger = logging.getLogger("gringotts")
+from typing import Tuple, Dict
 
 from discord import app_commands
 from discord.ext import commands, tasks
+
 from currency import Money
 from bank import (
     get_balance, set_balance, add_balance, subtract_if_enough,
@@ -29,111 +28,53 @@ from links import (
 )
 from vaults import set_vault_thread, get_vault_thread, unlink_vault_thread, post_receipt
 
-# at the top of each file that writes JSON
-import os
-
+# ---------------- DATA DIR / FILES ----------------
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# then build your file paths from DATA_DIR, e.g.:
 DB_FILE = os.path.join(DATA_DIR, "balances.json")
-# character_links.json, shops.json, vaults.json, pending_receipts.json, etc. all the same way
-
-
-# keep with your other _BASE_DIR usage
-DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-os.makedirs(DATA_DIR, exist_ok=True)
 PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
 
-# ---------------- LOGGING ----------------
-# ---------------- LOGGING BOOTSTRAP ----------------
-import logging, logging.handlers, os, re
-
+# ---------------- LOGGING BOOTSTRAP (safe & simple) ----------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE  = os.getenv("LOG_FILE", "bot.log")
 
-# Optional: silence a noisy webhook by ID or name (Wizarding Cards example)
-SILENCE_WEBHOOK_IDS = {1130656856990289961}  # add/remove as needed
-SILENCE_WEBHOOK_NAMES = {"Wizarding Cards"}  # exact author.name on the webhook message
-
-class WebhookNoiseFilter(logging.Filter):
-    """Drop log records that mention muted webhooks by id or name,
-    but let all other records through so we don't silence the world.
-    We match against the final formatted message text to keep it simple.
-    """
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        # Match "webhook_id=123..." patterns or author/name mentions in message text
-        if any(str(wid) in msg for wid in SILENCE_WEBHOOK_IDS):
-            return False
-        if any(name in msg for name in SILENCE_WEBHOOK_NAMES):
-            return False
-        return True
-
 def setup_logging():
     root = logging.getLogger()
-    # Remove any old handlers to avoid duplicates / misconfig
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    root.setLevel(logging.DEBUG)  # capture everything; handlers will filter
+    root.setLevel(logging.DEBUG)  # capture everything; handlers will gate
 
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s :: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Console handler
     ch = logging.StreamHandler()
     ch.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
     ch.setFormatter(fmt)
-    ch.addFilter(WebhookNoiseFilter())
 
-    # Rotating file handler
-    fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    fh = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+    )
     fh.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
     fh.setFormatter(fmt)
-    fh.addFilter(WebhookNoiseFilter())
 
     root.addHandler(ch)
     root.addHandler(fh)
 
-    # Our app logger
     app_logger = logging.getLogger("gringotts")
     app_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-    # Ensure children (gringotts.links/bank/shop/vaults) propagate to root handlers
     app_logger.propagate = True
 
 setup_logging()
 logger = logging.getLogger("gringotts")
 
-# Optional: heartbeat toggle to prove code path is running even if logging is misconfigured downstream
+# Optional: heartbeat toggle to prove on_message is firing
 DEBUG_EARN_HEARTBEAT = os.getenv("DEBUG_EARN_HEARTBEAT", "0") == "1"
 
-
-# ---------------- DEBUG (targeted, low-noise) ----------------
-# Set DEBUG_EARN_ALL=1 in your env to trace decisions in ALL channels/threads temporarily.
-DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
-
-# Track channels/threads where we want deep diagnostics:
-DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # start empty; we’ll toggle via /debug_toggle
-
-def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
-    if DEBUG_EARN_ALL:
-        return True
-    parent = getattr(ch, "parent", None)
-    candidates = {
-        getattr(ch, "id", None),
-        getattr(ch, "parent_id", None),
-        getattr(parent, "id", None) if parent else None,
-    }
-    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
-
-
 # ---------------- CONFIG ----------------
-# Keep your token out of source code. Set an env var: setx DISCORD_BOT_TOKEN "YOUR_TOKEN"
-import os
-
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN env var not set.")
@@ -142,29 +83,9 @@ if not TOKEN:
 TEST_GUILD_ID = 1393623189241991168
 TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 
-# ---------------- DEBUG (targeted, low-noise) ----------------
-# Only emit deep diagnostics for these channels/threads while troubleshooting.
-# Put your Events forum ID and/or the specific thread ID(s) here.
-# near other CONFIG
-DEBUG_EARNING_CHANNEL_IDS: set[int] = {
-    1411901315185119252,  # <-- this thread
-}
-
-
-def _debug_enabled_for(message: discord.Message) -> bool:
-    ch = message.channel
-    parent = getattr(ch, "parent", None)
-    candidates = {
-        getattr(ch, "id", None),
-        getattr(ch, "parent_id", None),
-        getattr(parent, "id", None),
-    }
-    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
-
-
 # Channels where messages earn money (include forum PARENT channel IDs)
 ALLOWED_CHANNEL_IDS: set[int] = {
-    1411901315185119252, # Witch's Market
+    1411901315185119252, # Witch's Market (Forum parent or specific thread)
     1393688264531247277, # Hogwarts Grounds
     1393683936009257141, # Hogwarts Castle
     1393687041212153886, # Slytherin Common Room
@@ -180,11 +101,9 @@ ALLOWED_CHANNEL_IDS: set[int] = {
     1406803659202887862, # Chaos Testing Center
 }
 
-# ---------------- OPTIONAL IGNORE LISTS FOR WEBHOOKS ----------------
-# If you have utility webhooks (dice rollers, card bots, etc.) that should never count,
-# add them here by webhook_id or display name.
+# OPTIONAL IGNORE LISTS FOR WEBHOOKS (utility bots etc.)
 IGNORED_WEBHOOK_IDS: set[int] = {
-    1130656856990289961,  # Wizarding Cards (example from your log)
+    1130656856990289961,  # Wizarding Cards
 }
 IGNORED_WEBHOOK_NAMES: set[str] = {
     "Wizarding Cards",
@@ -206,6 +125,27 @@ JOB_BONUSES: dict[str, Money] = {
 }
 
 STARTER_FUNDS = Money.from_str("50g")   # starting balance for a newly linked character
+
+# ---------------- DEBUG (targeted, low-noise) ----------------
+# Set DEBUG_EARN_ALL=1 in env to trace decisions in ALL channels/threads temporarily.
+DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
+
+# Track channels/threads where we want deep diagnostics (toggle with /debug_toggle).
+DEBUG_EARNING_CHANNEL_IDS: set[int] = {
+    # Example: add a thread ID or its parent forum ID here while testing
+    # 1411901315185119252,
+}
+
+def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
+    if DEBUG_EARN_ALL:
+        return True
+    parent = getattr(ch, "parent", None)
+    candidates = {
+        getattr(ch, "id", None),
+        getattr(ch, "parent_id", None),
+        getattr(parent, "id", None) if parent else None,
+    }
+    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
 
 # ---------------- BOT SETUP ----------------
 intents = discord.Intents.default()
@@ -238,61 +178,6 @@ def _msg_ctx(message: discord.Message) -> dict:
         "content_len": len((message.content or "").strip()),
     }
 
-def _allowed_channel_ids_for(message: discord.Message) -> list[int]:
-    ch = message.channel
-    ids_to_check: set[int] = set()
-    ids_to_check.add(getattr(ch, "id", None))
-    ids_to_check.add(getattr(ch, "parent_id", None))
-    ids_to_check.add(getattr(ch, "category_id", None))
-    parent = getattr(ch, "parent", None)
-    if parent is not None:
-        ids_to_check.add(getattr(parent, "id", None))
-        ids_to_check.add(getattr(parent, "parent_id", None))
-        ids_to_check.add(getattr(parent, "category_id", None))
-    return [cid for cid in ids_to_check if cid]
-
-# ---- shop embed helpers ----
-def _format_stock(qty: int | None) -> str:
-    return "∞" if qty is None else str(qty)
-
-def _shop_embeds(town: str, shop: str, items: list[tuple[str, Money, int | None]]) -> list[discord.Embed]:
-    """
-    Build one or more embeds for a shop's inventory.
-    Discord limit: max 25 fields per embed, so we chunk if needed.
-    """
-    if not items:
-        e = discord.Embed(
-            title=f"{shop} — {town}",
-            description="_No items in stock._",
-            color=discord.Color.blurple(),
-        )
-        return [e]
-
-    # chunk items into pages of 25
-    pages: list[list[tuple[str, Money, int | None]]] = []
-    CHUNK = 25
-    for i in range(0, len(items), CHUNK):
-        pages.append(items[i:i+CHUNK])
-
-    embeds: list[discord.Embed] = []
-    total_items = len(items)
-    for idx, chunk in enumerate(pages, start=1):
-        desc = f"**{shop}** — *{town}*\nShowing {len(chunk)} of {total_items} item(s)."
-        e = discord.Embed(description=desc, color=discord.Color.blurple())
-        e.set_author(name="Shopkeeper Retail Registry")
-        if len(pages) > 1:
-            e.set_footer(text=f"Page {idx}/{len(pages)}")
-
-        for name, price, qty in chunk:
-            e.add_field(
-                name=name,
-                value=f"**{price.pretty_long()}**  ·  stock: `{_format_stock(qty)}`",
-                inline=False
-            )
-        embeds.append(e)
-    return embeds
-
-# ---- pending receipts helpers ----
 def _pending_load() -> dict:
     if not os.path.exists(PENDING_FILE):
         return {}
@@ -316,14 +201,6 @@ def _utc_datestr(dt: datetime.datetime | None = None) -> str:
 def queue_rp_earning(guild_id: int, user_id: int, char_key: str, delta_knuts: int) -> None:
     """
     Accumulate today's total (UTC) RP earnings per (guild, user, character).
-    Schema:
-      {
-        "YYYY-MM-DD": {
-          "<guild_id>": {
-            "<user_id>:<char_key>": {"knuts": int, "count": int}
-          }
-        }
-      }
     """
     data = _pending_load()
     day = _utc_datestr()
@@ -338,13 +215,10 @@ def queue_rp_earning(guild_id: int, user_id: int, char_key: str, delta_knuts: in
 
     _pending_save_atomic(data)
 
-from typing import Tuple, Dict
-
 def is_earning_channel_with_details(
     ch: discord.abc.GuildChannel | discord.Thread
 ) -> tuple[bool, dict]:
     ids_to_check: list[int] = []
-
     ids_to_check.append(getattr(ch, "id", None))
     ids_to_check.append(getattr(ch, "parent_id", None))
     ids_to_check.append(getattr(ch, "category_id", None))
@@ -371,30 +245,18 @@ def is_earning_channel_with_details(
     }
     return allowed, details
 
-
 def is_earning_channel(message: discord.Message) -> bool:
     """Allow by channel ID, its parent (e.g., forum or text channel), or their category."""
-    ch = message.channel  # can be TextChannel, ForumChannel, Thread, etc.
-
+    ch = message.channel
     ids_to_check: set[int] = set()
-
-    # The channel itself
     ids_to_check.add(getattr(ch, "id", None))
-
-    # Immediate parent (thread -> parent text/forum channel)
     ids_to_check.add(getattr(ch, "parent_id", None))
-
-    # Category of this channel (TextChannel/ForumChannel have category_id)
     ids_to_check.add(getattr(ch, "category_id", None))
-
-    # If it's a thread, also check the parent channel's own category
     parent = getattr(ch, "parent", None)
     if parent is not None:
         ids_to_check.add(getattr(parent, "id", None))
-        ids_to_check.add(getattr(parent, "parent_id", None))     # usually None, but harmless
+        ids_to_check.add(getattr(parent, "parent_id", None))
         ids_to_check.add(getattr(parent, "category_id", None))
-
-    # Filter out Nones and test membership
     return any(cid in ALLOWED_CHANNEL_IDS for cid in ids_to_check if cid)
 
 def can_payout(owner_user_id: int, char_key: str | None) -> bool:
@@ -434,12 +296,14 @@ async def withdraw_from_character(
     await post_receipt(bot, guild, user_id, char_key, neg, new_bal, reason)
     return True
 
-
 # ---------------- EVENTS ----------------
 @bot.event
 async def on_ready():
+    # Guaranteed startup log
+    logger.info("startup: bot ready as %s (guilds=%d, LOG_LEVEL=%s, LOG_FILE=%s)",
+                bot.user, len(bot.guilds), LOG_LEVEL, LOG_FILE)
     try:
-        bot.tree.copy_global_to(guild=TEST_GUILD)  # OK even if you have no global cmds
+        bot.tree.copy_global_to(guild=TEST_GUILD)
         synced = await bot.tree.sync(guild=TEST_GUILD)
         logger.info(f"Synced {len(synced)} commands to {TEST_GUILD_ID}: {[c.name for c in synced]}")
     except Exception as e:
@@ -458,6 +322,14 @@ async def on_message(message: discord.Message):
     if message.author.id == bot.user.id:
         return
 
+    # HEARTBEAT: prove we see webhook messages *before* any early returns.
+    if DEBUG_EARN_HEARTBEAT and message.webhook_id:
+        logger.info("hb:on_message ch=%s parent=%s webhook=%s len=%s",
+                    getattr(message.channel, 'id', None),
+                    getattr(message.channel, 'parent_id', None),
+                    message.webhook_id,
+                    len((message.content or '').strip()))
+
     # Only award for proxied/webhook messages (Tupperbox etc.)
     if not message.webhook_id:
         await bot.process_commands(message)
@@ -465,7 +337,6 @@ async def on_message(message: discord.Message):
 
     # Is this channel/thread under debug?
     dbg = _debug_enabled_for_channel(message.channel)
-
     if dbg:
         logger.info(
             "debug:earn_trace entry | "
@@ -476,7 +347,7 @@ async def on_message(message: discord.Message):
             f"len={len((message.content or '').strip())}"
         )
 
-    # Optional: hard-ignore utility webhooks
+    # Hard-ignore utility webhooks
     if message.webhook_id in IGNORED_WEBHOOK_IDS or (message.author.name or "") in IGNORED_WEBHOOK_NAMES:
         if dbg:
             logger.info("debug:earn_skip reason='ignored_webhook'")
@@ -524,10 +395,7 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
-
 # ---------------- SLASH COMMANDS ----------------
-from discord import app_commands
-
 @bot.tree.command(name="debug_toggle", description="(Staff) Toggle earn debug tracing for this channel/thread.")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -541,13 +409,11 @@ async def debug_toggle_cmd(interaction: discord.Interaction):
         DEBUG_EARNING_CHANNEL_IDS.add(cid)
         await interaction.response.send_message(f"🔊 Debug ON for <#{cid}>", ephemeral=True)
 
-
 @bot.tree.command(name="debug_channel", description="(Staff) Explain why this channel/thread is or isn't allowed for RP earnings.")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.checks.has_permissions(manage_guild=True)
 async def debug_channel_cmd(interaction: discord.Interaction):
     allowed, details = is_earning_channel_with_details(interaction.channel)
-
     lines = [
         f"**Allowed:** {details['allowed']}",
         f"Channel type: `{details['channel_type']}`  (id: `{details['channel_id']}`)",
@@ -559,8 +425,6 @@ async def debug_channel_cmd(interaction: discord.Interaction):
         f"ALLOW list size: `{len(ALLOWED_CHANNEL_IDS)}`",
     ]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-
 
 @bot.tree.command(name="hello", description="Test command to verify sync.")
 @app_commands.guilds(TEST_GUILD)
@@ -738,7 +602,6 @@ async def shop_cmd(
         if len(embeds) == 1:
             await interaction.response.send_message(embed=embeds[0])
         else:
-            # if multiple pages, send the first then follow up with the rest
             await interaction.response.send_message(embed=embeds[0])
             for e in embeds[1:]:
                 await interaction.followup.send(embed=e)
@@ -1125,7 +988,6 @@ async def tip_cmd(interaction: discord.Interaction, from_character: str, to_char
 
 # ---------------- HELP (slash) ----------------
 class HelpSection(app_commands.Transform):
-    # optional nicer display in UI (not strictly needed)
     pass
 
 HELP_CHOICES = [
@@ -1138,9 +1000,7 @@ HELP_CHOICES = [
 def _help_embed_linking() -> discord.Embed:
     e = discord.Embed(
         title="Linking Characters — Tupperbox/Webhook",
-        description=(
-            "Link your **Tupperbox display name** to your Discord account so RP posts credit the right wallet."
-        ),
+        description=("Link your **Tupperbox display name** to your Discord account so RP posts credit the right wallet."),
         color=discord.Color.blurple(),
     )
     e.add_field(
@@ -1168,18 +1028,15 @@ def _help_embed_linking() -> discord.Embed:
 def _help_embed_vault() -> discord.Embed:
     e = discord.Embed(
         title="Gringotts Vaults — Forum Threads",
-        description=(
-            "Each character can have a **Vault thread** in the Gringotts forum. "
-            "The bot posts **receipts** (deposits/withdrawals) there."
-        ),
+        description=("Each character can have a **Vault thread** in the Gringotts forum. The bot posts **receipts** there."),
         color=discord.Color.gold(),
     )
     e.add_field(
         name="Commands",
         value=(
-            "• `/vault_create character:\"Name\"` — makes a vault thread with a welcome embed\n"
-            "• `/vault_link character:\"Name\" thread_id:\"123456789\"` — link an existing forum thread\n"
-            "• `/vault_unlink character:\"Name\"` — unlink the vault"
+            "• `/vault_create character:\"Name\"`\n"
+            "• `/vault_link character:\"Name\" thread_id:\"123456789\"`\n"
+            "• `/vault_unlink character:\"Name\"`"
         ),
         inline=False,
     )
@@ -1196,18 +1053,15 @@ def _help_embed_vault() -> discord.Embed:
 def _help_embed_shopping() -> discord.Embed:
     e = discord.Embed(
         title="Shops & Inventory",
-        description=(
-            "Browse towns/shops, check stock & prices, and buy items with a character wallet. "
-            "Some items have **unlimited stock (∞)**; others are limited."
-        ),
+        description=("Browse towns/shops, check stock & prices, and buy items with a character wallet."),
         color=discord.Color.green(),
     )
     e.add_field(
         name="Player Commands",
         value=(
-            "• `/shop action:towns` — list towns\n"
-            "• `/shop action:shops town:\"Hogsmeade\"` — list shops in a town\n"
-            "• `/shop action:list town:\"Hogsmeade\" shop:\"Honeydukes\"` — view inventory (embed)\n"
+            "• `/shop action:towns`\n"
+            "• `/shop action:shops town:\"Hogsmeade\"`\n"
+            "• `/shop action:list town:\"Hogsmeade\" shop:\"Honeydukes\"`\n"
             "• `/shop action:buy town:\"…\" shop:\"…\" item:\"…\" quantity:1 character:\"Your Char\"`"
         ),
         inline=False,
@@ -1215,11 +1069,10 @@ def _help_embed_shopping() -> discord.Embed:
     e.add_field(
         name="Staff (Manage Server) Commands",
         value=(
-            "• `/shop_set town:\"…\" shop:\"…\" item:\"…\" price:\"2g 5s\" qty:10` — add/update item\n"
-            "• `/shop_price town:\"…\" shop:\"…\" item:\"…\" price:\"…\"` — change price\n"
-            "• `/shop_restock town:\"…\" shop:\"…\" item:\"…\" delta:10` — adjust stock (+/-)\n"
-            "• `/shop_remove town:\"…\" shop:\"…\" item:\"…\"` — remove item\n"
-            "• `/shop_seed` — load demo catalog (if enabled)"
+            "• `/shop_set town:\"…\" shop:\"…\" item:\"…\" price:\"2g 5s\" qty:10`\n"
+            "• `/shop_price town:\"…\" shop:\"…\" item:\"…\" price:\"…\"`\n"
+            "• `/shop_restock town:\"…\" shop:\"…\" item:\"…\" delta:10`\n"
+            "• `/shop_remove town:\"…\" shop:\"…\"`"
         ),
         inline=False,
     )
@@ -1248,7 +1101,6 @@ async def help_cmd(interaction: discord.Interaction, section: app_commands.Choic
     if sel in ("all", "shopping"):
         embeds.append(_help_embed_shopping())
 
-    # Send the first embed, then follow-ups if we have multiple pages
     if not embeds:
         await interaction.response.send_message("No help available.", ephemeral=True)
         return
@@ -1272,7 +1124,6 @@ async def weekly_payday():
                 if bonus:
                     pay += bonus
             if pay.knuts > 0:
-                # Deposits to USER-LEVEL wallet (no character key) by design.
                 add_balance(member.id, pay)
                 try:
                     await member.send(f"💰 Payday! You received **{pay.pretty_long()}**.")
@@ -1284,7 +1135,6 @@ async def flush_daily_receipts():
     """
     Post one summary receipt per character for yesterday's RP earnings (UTC).
     """
-    # summarize the FULL previous day
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     prev_day = (now_utc - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -1296,7 +1146,6 @@ async def flush_daily_receipts():
 
     flush_count = 0
 
-    # Walk guilds -> entries
     for gkey, entries in day_bucket.items():
         guild_id = int(gkey)
         guild = discord.utils.get(bot.guilds, id=guild_id)
@@ -1317,12 +1166,10 @@ async def flush_daily_receipts():
                 logger.debug(f"flush:zero_totals user_id={user_id} char_key='{char_key}' day={prev_day}")
                 continue
 
-            # Build Money from raw knuts
             delta = Money(knuts=total_knuts)
             new_bal = get_balance(user_id, key=char_key)
             reason = f"Daily RP earnings ({msg_count} message{'s' if msg_count != 1 else ''}) for {prev_day} UTC"
 
-            # Post receipt into the character's vault thread (if linked)
             try:
                 await post_receipt(bot, guild, user_id, char_key, delta, new_bal, reason=reason)
                 flush_count += 1
@@ -1332,7 +1179,6 @@ async def flush_daily_receipts():
                     f"guild_id={guild_id} day={prev_day} delta_knuts={total_knuts}"
                 )
 
-    # Remove the flushed day and save
     data.pop(prev_day, None)
     _pending_save_atomic(data)
     logger.info(f"flush:completed day={prev_day} posted_receipts={flush_count}")
@@ -1346,7 +1192,6 @@ async def _ac_towns(_: discord.Interaction, current: str):
     return [_ac.Choice(name=t, value=t) for t in _list_towns() if cur in t.lower()][:25]
 
 async def _ac_shops(interaction: discord.Interaction, current: str):
-    # Try to read the 'town' option from the interaction for better filtering
     town = None
     try:
         town = interaction.namespace.town
@@ -1364,7 +1209,6 @@ async def _ac_items(interaction: discord.Interaction, current: str):
     names = [n for (n, _p, _q) in items]
     return [_ac.Choice(name=n, value=n) for n in names if cur in n.lower()][:25]
 
-# Wire to /shop
 @shop_cmd.autocomplete("town")
 async def _ac_shop_town(interaction, current: str):
     return await _ac_towns(interaction, current)
@@ -1377,7 +1221,6 @@ async def _ac_shop_shop(interaction, current: str):
 async def _ac_shop_item(interaction, current: str):
     return await _ac_items(interaction, current)
 
-# Wire to staff cmds
 @shop_set_cmd.autocomplete("town")
 async def _ac_set_town(interaction, current: str):
     return await _ac_towns(interaction, current)
@@ -1425,7 +1268,6 @@ async def _ac_remove_shop(interaction, current: str):
 @shop_remove_cmd.autocomplete("item")
 async def _ac_remove_item(interaction, current: str):
     return await _ac_items(interaction, current)
-
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
