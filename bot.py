@@ -46,21 +46,70 @@ os.makedirs(DATA_DIR, exist_ok=True)
 PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
 
 # ---------------- LOGGING ----------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
-LOG_FILE  = os.getenv("LOG_FILE", os.path.join(DATA_DIR, "bot.log"))
+# ---------------- LOGGING BOOTSTRAP ----------------
+import logging, logging.handlers, os, re
 
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE  = os.getenv("LOG_FILE", "bot.log")
 
+# Optional: silence a noisy webhook by ID or name (Wizarding Cards example)
+SILENCE_WEBHOOK_IDS = {1130656856990289961}  # add/remove as needed
+SILENCE_WEBHOOK_NAMES = {"Wizarding Cards"}  # exact author.name on the webhook message
+
+class WebhookNoiseFilter(logging.Filter):
+    """Drop log records that mention muted webhooks by id or name,
+    but let all other records through so we don't silence the world.
+    We match against the final formatted message text to keep it simple.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        # Match "webhook_id=123..." patterns or author/name mentions in message text
+        if any(str(wid) in msg for wid in SILENCE_WEBHOOK_IDS):
+            return False
+        if any(name in msg for name in SILENCE_WEBHOOK_NAMES):
+            return False
+        return True
+
+def setup_logging():
+    root = logging.getLogger()
+    # Remove any old handlers to avoid duplicates / misconfig
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    root.setLevel(logging.DEBUG)  # capture everything; handlers will filter
+
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s :: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    ch.setFormatter(fmt)
+    ch.addFilter(WebhookNoiseFilter())
+
+    # Rotating file handler
+    fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    fh.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    fh.setFormatter(fmt)
+    fh.addFilter(WebhookNoiseFilter())
+
+    root.addHandler(ch)
+    root.addHandler(fh)
+
+    # Our app logger
+    app_logger = logging.getLogger("gringotts")
+    app_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    # Ensure children (gringotts.links/bank/shop/vaults) propagate to root handlers
+    app_logger.propagate = True
+
+setup_logging()
 logger = logging.getLogger("gringotts")
-logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-_handler = RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8")
-_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s :: %(message)s"))
-logger.addHandler(_handler)
-logger.propagate = False
 
-# --- Logging handle used throughout ---
-import logging
-logger = logging.getLogger("gringotts")  # matches your earlier "gringotts ::" logs
+# Optional: heartbeat toggle to prove code path is running even if logging is misconfigured downstream
+DEBUG_EARN_HEARTBEAT = os.getenv("DEBUG_EARN_HEARTBEAT", "0") == "1"
+
 
 # ---------------- DEBUG (targeted, low-noise) ----------------
 # Set DEBUG_EARN_ALL=1 in your env to trace decisions in ALL channels/threads temporarily.
