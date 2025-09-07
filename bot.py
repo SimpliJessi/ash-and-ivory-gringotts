@@ -9,6 +9,8 @@ import discord
 import random
 import datetime
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -40,6 +42,18 @@ DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
 PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
 
+# ---------------- LOGGING ----------------
+LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+LOG_FILE  = os.getenv("LOG_FILE", os.path.join(DATA_DIR, "bot.log"))
+
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+logger = logging.getLogger("gringotts")
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+_handler = RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8")
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s :: %(message)s"))
+logger.addHandler(_handler)
+logger.propagate = False
 
 # ---------------- CONFIG ----------------
 # Keep your token out of source code. Set an env var: setx DISCORD_BOT_TOKEN "YOUR_TOKEN"
@@ -48,7 +62,6 @@ import os
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN env var not set.")
-
 
 # Your server (guild-only sync = instant command availability)
 TEST_GUILD_ID = 1393623189241991168
@@ -99,6 +112,39 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 last_earn_at: dict[tuple[int, str], float] = {}
 
 # ---------------- HELPERS ----------------
+
+# ---- logging helpers ----
+def _msg_ctx(message: discord.Message) -> dict:
+    ch = message.channel
+    parent = getattr(ch, "parent", None)
+    return {
+        "guild_id": getattr(message.guild, "id", None),
+        "message_id": getattr(message, "id", None),
+        "author_id": getattr(message.author, "id", None),
+        "author_name": getattr(message.author, "name", None),
+        "author_is_bot": getattr(message.author, "bot", None),
+        "webhook_id": getattr(message, "webhook_id", None),
+        "channel_id": getattr(ch, "id", None),
+        "channel_name": getattr(ch, "name", None),
+        "parent_id": getattr(ch, "parent_id", None),
+        "category_id": getattr(ch, "category_id", None),
+        "parent_category_id": getattr(parent, "category_id", None) if parent else None,
+        "is_thread": isinstance(ch, discord.Thread),
+        "content_len": len((message.content or "").strip()),
+    }
+
+def _allowed_channel_ids_for(message: discord.Message) -> list[int]:
+    ch = message.channel
+    ids_to_check: set[int] = set()
+    ids_to_check.add(getattr(ch, "id", None))
+    ids_to_check.add(getattr(ch, "parent_id", None))
+    ids_to_check.add(getattr(ch, "category_id", None))
+    parent = getattr(ch, "parent", None)
+    if parent is not None:
+        ids_to_check.add(getattr(parent, "id", None))
+        ids_to_check.add(getattr(parent, "parent_id", None))
+        ids_to_check.add(getattr(parent, "category_id", None))
+    return [cid for cid in ids_to_check if cid]
 
 # ---- shop embed helpers ----
 def _format_stock(qty: int | None) -> str:
@@ -256,60 +302,98 @@ async def on_ready():
     try:
         bot.tree.copy_global_to(guild=TEST_GUILD)  # OK even if you have no global cmds
         synced = await bot.tree.sync(guild=TEST_GUILD)
-        print(f"[DEV] Synced {len(synced)} commands to {TEST_GUILD_ID}: {[c.name for c in synced]}")
+        logger.info(f"Synced {len(synced)} commands to {TEST_GUILD_ID}: {[c.name for c in synced]}")
     except Exception as e:
-        print(f"[SYNC ERROR] {type(e).__name__}: {e}")
+        logger.exception(f"[SYNC ERROR] {type(e).__name__}: {e}")
 
     if not weekly_payday.is_running():
         weekly_payday.start()
     if not flush_daily_receipts.is_running():
         flush_daily_receipts.start()
 
+    logger.info(f"Bot ready as {bot.user} in {len(bot.guilds)} guild(s).")
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Ignore ourselves
-    if message.author.id == bot.user.id:
-        return
+    try:
+        # Ignore ourselves
+        if message.author.id == bot.user.id:
+            return
 
-    # Option B: only award for Tupperbox/webhook messages
-    if not message.webhook_id:
+        ctx = _msg_ctx(message)
+
+        # Only award for webhook messages (Tupperbox/proxy)
+        if not message.webhook_id:
+            logger.debug(f"skip:not_webhook | {ctx}")
+            await bot.process_commands(message)
+            return
+
+        # Derive normalized character key and resolve owner
+        raw_name = message.author.name or ""
+        char_key = normalize_display_name(raw_name)
+        linked_uid = resolve_character(raw_name)
+
+        if not linked_uid:
+            logger.info(f"skip:unlinked_character name='{raw_name}' char_key='{char_key}' | {ctx}")
+            await bot.process_commands(message)
+            return
+
+        # Channel allowlist check
+        ids_checked = _allowed_channel_ids_for(message)
+        if not is_earning_channel(message):
+            logger.info(
+                f"skip:channel_not_allowed ids_checked={ids_checked} allowed={list(ALLOWED_CHANNEL_IDS)} | {ctx}"
+            )
+            await bot.process_commands(message)
+            return
+
+        # Min length check
+        content = (message.content or "").strip()
+        if len(content) < MIN_MESSAGE_LENGTH:
+            logger.info(
+                f"skip:too_short len={len(content)} min_required={MIN_MESSAGE_LENGTH} "
+                f"name='{raw_name}' char_key='{char_key}' | {ctx}"
+            )
+            await bot.process_commands(message)
+            return
+
+        # Cooldown check (per user+character)
+        now = time.time()
+        key = (linked_uid, (char_key or "").lower())
+        last = last_earn_at.get(key, 0.0)
+        elapsed = now - last
+        if elapsed < EARN_COOLDOWN_SECONDS:
+            logger.debug(
+                f"skip:cooldown elapsed={elapsed:.2f}s required={EARN_COOLDOWN_SECONDS}s "
+                f"user_id={linked_uid} char_key='{char_key}' | {ctx}"
+            )
+            await bot.process_commands(message)
+            return
+
+        # Passed all gates: record and queue
+        last_earn_at[key] = now
+
+        add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
+        queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
+
+        logger.info(
+            f"earn:queued amount='{EARN_PER_MESSAGE.pretty_long()}' "
+            f"user_id={linked_uid} char_key='{char_key}' msg_len={len(content)} | {ctx}"
+        )
+
         await bot.process_commands(message)
-        return
 
-    # Derive normalized character key and resolve owner
-    raw_name = message.author.name or ""
-    char_key = normalize_display_name(raw_name)
-    linked_uid = resolve_character(raw_name)
-
-    if not linked_uid:
-        # Unlinked tupper: skip quietly (or send a one-time nudge if you want)
-        await bot.process_commands(message)
-        return
-
-    if not is_earning_channel(message):
-        await bot.process_commands(message)
-        return
-
-    content = (message.content or "").strip()
-    if len(content) < MIN_MESSAGE_LENGTH:
-        await bot.process_commands(message)
-        return
-
-    if not can_payout(linked_uid, char_key):
-        await bot.process_commands(message)
-        return
-
-    # Credit immediately (so balances stay current)...
-    add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
-    # ...but queue the receipt for the daily UTC summary
-    queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
-
-    print(f"[EARN] +{EARN_PER_MESSAGE.pretty_long()} -> {linked_uid}:{char_key} (queued for daily receipt)")
-
-    await bot.process_commands(message)
+    except Exception:
+        # Never break message flow—log and continue
+        logger.exception(f"on_message_exception | {_msg_ctx(message)}")
+        try:
+            await bot.process_commands(message)
+        except Exception:
+            logger.exception("process_commands_exception")
 
 # ---------------- SLASH COMMANDS ----------------
+from discord import app_commands
+
 @bot.tree.command(name="hello", description="Test command to verify sync.")
 @app_commands.guilds(TEST_GUILD)
 async def hello_cmd(interaction: discord.Interaction):
@@ -394,15 +478,14 @@ async def link_character_cmd(interaction: discord.Interaction, name: str, user: 
                 new_balance=new_bal,
                 reason="Starter funds for new character link"
             )
-        except Exception:
-            pass  # silent if no vault linked yet
+        except Exception as e:
+            logger.warning(f"post_receipt starter funds failed for {target.id}/{key}: {e}")
 
     await interaction.response.send_message(
         f"🔗 Linked **{name}** → {target.mention}. Proxied posts by **{name}** will now credit that wallet."
         + granted_text,
         ephemeral=True
     )
-
 
 @bot.tree.command(name="unlink_character", description="Remove link for a character display name.")
 @app_commands.guilds(TEST_GUILD)
@@ -492,7 +575,6 @@ async def shop_cmd(
             for e in embeds[1:]:
                 await interaction.followup.send(embed=e)
         return
-
 
     # buy
     if action == "buy":
@@ -622,7 +704,6 @@ async def shop_remove_cmd(interaction: discord.Interaction, town: str, shop: str
         await interaction.response.send_message("❌ Item not found.", ephemeral=True)
         return
     await interaction.response.send_message(f"🗑️ Removed **{item}** from **{shop}** (*{town}*).", ephemeral=True)
-
 
 # Leaderboards
 @bot.tree.command(name="leaderboard", description="Top balances (user totals or character wallets).")
@@ -875,8 +956,6 @@ async def tip_cmd(interaction: discord.Interaction, from_character: str, to_char
     )
 
 # ---------------- HELP (slash) ----------------
-from discord import app_commands
-
 class HelpSection(app_commands.Transform):
     # optional nicer display in UI (not strictly needed)
     pass
@@ -1044,24 +1123,30 @@ async def flush_daily_receipts():
     data = _pending_load()
     day_bucket = data.get(prev_day)
     if not day_bucket:
+        logger.debug(f"flush:no_data_for_day day={prev_day}")
         return
+
+    flush_count = 0
 
     # Walk guilds -> entries
     for gkey, entries in day_bucket.items():
         guild_id = int(gkey)
         guild = discord.utils.get(bot.guilds, id=guild_id)
         if not guild:
+            logger.warning(f"flush:missing_guild guild_id={guild_id} day={prev_day}")
             continue
 
         for uck, rec in entries.items():
             try:
                 uid_str, char_key = uck.split(":", 1)
             except ValueError:
+                logger.warning(f"flush:bad_key uck='{uck}' day={prev_day}")
                 continue
             user_id = int(uid_str)
             total_knuts = int(rec.get("knuts", 0))
             msg_count = int(rec.get("count", 0))
             if total_knuts <= 0 or msg_count <= 0:
+                logger.debug(f"flush:zero_totals user_id={user_id} char_key='{char_key}' day={prev_day}")
                 continue
 
             # Build Money from raw knuts
@@ -1072,13 +1157,17 @@ async def flush_daily_receipts():
             # Post receipt into the character's vault thread (if linked)
             try:
                 await post_receipt(bot, guild, user_id, char_key, delta, new_bal, reason=reason)
+                flush_count += 1
             except Exception:
-                # Swallow to avoid breaking the whole flush if one post fails
-                pass
+                logger.exception(
+                    f"flush:post_receipt_failed user_id={user_id} char_key='{char_key}' "
+                    f"guild_id={guild_id} day={prev_day} delta_knuts={total_knuts}"
+                )
 
     # Remove the flushed day and save
     data.pop(prev_day, None)
     _pending_save_atomic(data)
+    logger.info(f"flush:completed day={prev_day} posted_receipts={flush_count}")
 
 # ---- Autocomplete helpers for /shop and staff cmds ----
 from discord import app_commands as _ac
@@ -1172,4 +1261,5 @@ async def _ac_remove_item(interaction, current: str):
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
+    logger.info("Starting bot process...")
     bot.run(TOKEN)
