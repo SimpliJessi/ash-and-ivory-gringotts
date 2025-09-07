@@ -30,11 +30,6 @@ import os
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# then build your file paths from DATA_DIR, e.g.:
-DB_FILE = os.path.join(DATA_DIR, "balances.json")
-# character_links.json, shops.json, vaults.json, pending_receipts.json, etc. all the same way
-
-
 # ---------- Storage path ----------
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -44,6 +39,21 @@ DB_FILE = os.path.join(DATA_DIR, "character_links.json")
 _lock = threading.Lock()
 
 # ---------- Normalization helpers ----------
+def _normalize_or_fail(name: str) -> str:
+    key = normalize_display_name(name)
+    if not key:
+        # Fallback: try a “softer” normalization so pure emoji names don’t collapse to empty
+        soft = _nfkc_lower(name)
+        soft = re.sub(r"\s+", " ", soft).strip()
+        # Keep only letters/digits/spaces/'/-
+        soft = re.sub(r"[^a-z0-9\s'\-]", "", soft)
+        soft = re.sub(r"\s+", " ", soft).strip()
+        if soft:
+            return soft
+        # Still empty? Refuse to link.
+        raise ValueError("Character name normalizes to empty; please add at least one letter/number.")
+    return key
+
 
 def _nfkc_lower(s: str) -> str:
     """Base normalize + lowercase + trim."""
@@ -152,23 +162,19 @@ def _save(data: Dict[str, int]) -> None:
 # ---------- Public API ----------
 
 def link_character(name: str, user_id: int) -> None:
-    """Link a character display name to a user id (overwrites existing)."""
-    key = normalize_display_name(name)
+    key = _normalize_or_fail(name)
     with _lock:
         data = _load()
         data[key] = int(user_id)
         _save(data)
 
 def link_alias(alias_name: str, user_id: int) -> None:
-    """
-    Create an extra normalized key pointing to the same user.
-    Useful when someone insists on a highly decorated/emoji variant.
-    """
-    key = normalize_display_name(alias_name)
+    key = _normalize_or_fail(alias_name)
     with _lock:
         data = _load()
         data[key] = int(user_id)
         _save(data)
+
 
 def unlink_character(name: str) -> bool:
     """Remove a link. Returns True if it existed."""
@@ -185,13 +191,14 @@ def unlink_character(name: str) -> bool:
         return existed
 
 def resolve_character(name: str) -> Optional[int]:
-    """Return the linked user_id for a character display name, else None."""
     with _lock:
         data = _load()
-    for k in _norm_variants(name):
-        if k in data:
+    # Try smart-normalized first (most strict), then soft-lowered variant
+    for k in (normalize_display_name(name), _nfkc_lower(name)):
+        if k and k in data:
             return int(data[k])
     return None
+
 
 def all_links() -> Dict[str, int]:
     """
