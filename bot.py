@@ -58,6 +58,29 @@ _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s :: %
 logger.addHandler(_handler)
 logger.propagate = False
 
+# --- Logging handle used throughout ---
+import logging
+logger = logging.getLogger("gringotts")  # matches your earlier "gringotts ::" logs
+
+# ---------------- DEBUG (targeted, low-noise) ----------------
+# Set DEBUG_EARN_ALL=1 in your env to trace decisions in ALL channels/threads temporarily.
+DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
+
+# Track channels/threads where we want deep diagnostics:
+DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # start empty; we’ll toggle via /debug_toggle
+
+def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
+    if DEBUG_EARN_ALL:
+        return True
+    parent = getattr(ch, "parent", None)
+    candidates = {
+        getattr(ch, "id", None),
+        getattr(ch, "parent_id", None),
+        getattr(parent, "id", None) if parent else None,
+    }
+    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
+
+
 # ---------------- CONFIG ----------------
 # Keep your token out of source code. Set an env var: setx DISCORD_BOT_TOKEN "YOUR_TOKEN"
 import os
@@ -266,25 +289,17 @@ def queue_rp_earning(guild_id: int, user_id: int, char_key: str, delta_knuts: in
 
     _pending_save_atomic(data)
 
-# Replace your existing is_earning_channel_with_details(...) with this:
-
 from typing import Tuple, Dict
 
 def is_earning_channel_with_details(
     ch: discord.abc.GuildChannel | discord.Thread
-) -> Tuple[bool, Dict]:
-    """
-    Accepts a Channel or Thread object and returns (allowed?, details).
-    Checks the channel, its parent (for threads), and their categories against ALLOWED_CHANNEL_IDS.
-    """
+) -> tuple[bool, dict]:
     ids_to_check: list[int] = []
 
-    # The object itself
     ids_to_check.append(getattr(ch, "id", None))
     ids_to_check.append(getattr(ch, "parent_id", None))
     ids_to_check.append(getattr(ch, "category_id", None))
 
-    # Parent (e.g., thread.parent is the Forum/Text channel)
     parent = getattr(ch, "parent", None)
     if parent is not None:
         ids_to_check.append(getattr(parent, "id", None))
@@ -292,23 +307,20 @@ def is_earning_channel_with_details(
         ids_to_check.append(getattr(parent, "category_id", None))
 
     ids_to_check = [cid for cid in ids_to_check if cid]
-
     matched = [cid for cid in ids_to_check if cid in ALLOWED_CHANNEL_IDS]
     allowed = bool(matched)
-
     details = {
         "channel_type": type(ch).__name__,
         "channel_id": getattr(ch, "id", None),
         "parent_id": getattr(ch, "parent_id", None),
         "category_id": getattr(ch, "category_id", None),
-        "parent_type": (type(parent).__name__ if parent else None),
-        "parent_category_id": (getattr(parent, "category_id", None) if parent else None),
+        "parent_type": type(parent).__name__ if parent else None,
+        "parent_category_id": getattr(parent, "category_id", None) if parent else None,
         "ids_checked": ids_to_check,
         "ids_matched": matched,
         "allowed": allowed,
     }
     return allowed, details
-
 
 
 def is_earning_channel(message: discord.Message) -> bool:
@@ -402,72 +414,84 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # Is this channel/thread under debug?
+    dbg = _debug_enabled_for_channel(message.channel)
+
+    if dbg:
+        logger.info(
+            "debug:earn_trace entry | "
+            f"guild_id={getattr(message.guild, 'id', None)} message_id={message.id} "
+            f"webhook_id={message.webhook_id} author='{message.author.name}' "
+            f"channel_id={getattr(message.channel, 'id', None)} "
+            f"parent_id={getattr(message.channel, 'parent_id', None)} "
+            f"len={len((message.content or '').strip())}"
+        )
+
     # Optional: hard-ignore utility webhooks
     if message.webhook_id in IGNORED_WEBHOOK_IDS or (message.author.name or "") in IGNORED_WEBHOOK_NAMES:
+        if dbg:
+            logger.info("debug:earn_skip reason='ignored_webhook'")
         await bot.process_commands(message)
         return
 
-    # --- Targeted debug snapshot (computed once) ---
-    dbg = _debug_enabled_for(message)
-    dbg_fields = {
-        "guild_id": getattr(message.guild, "id", None),
-        "message_id": message.id,
-        "author_id": message.author.id,
-        "author_name": message.author.name,
-        "webhook_id": message.webhook_id,
-        "channel_id": getattr(message.channel, "id", None),
-        "channel_name": getattr(message.channel, "name", None),
-        "parent_id": getattr(message.channel, "parent_id", None),
-        "category_id": getattr(message.channel, "category_id", None),
-        "is_thread": isinstance(message.channel, discord.Thread),
-        "content_len": len((message.content or "").strip()),
-    }
-
-    # EARLY: channel allowlist
+    # Channel allowlist first
     allowed, ch_details = is_earning_channel_with_details(message.channel)
     if not allowed:
         if dbg:
-            logger.info(f"debug:earn_skip reason='channel_not_allowed' | {dbg_fields} | {ch_details}")
+            logger.info(f"debug:earn_skip reason='channel_not_allowed' | {ch_details}")
         await bot.process_commands(message)
         return
 
-    # EARLY: content length
+    # Content length
     content = (message.content or "").strip()
     if len(content) < MIN_MESSAGE_LENGTH:
         if dbg:
-            logger.info(f"debug:earn_skip reason='too_short' min={MIN_MESSAGE_LENGTH} | {dbg_fields}")
+            logger.info(f"debug:earn_skip reason='too_short' min={MIN_MESSAGE_LENGTH} actual={len(content)}")
         await bot.process_commands(message)
         return
 
-    # Character resolution (only now, since it might be expensive)
+    # Character resolution
     raw_name = message.author.name or ""
     char_key = normalize_display_name(raw_name)
     linked_uid = resolve_character(raw_name)
     if not linked_uid:
         if dbg:
-            logger.info(f"debug:earn_skip reason='unlinked_character' name='{raw_name}' char_key='{char_key}' | {dbg_fields}")
+            logger.info(f"debug:earn_skip reason='unlinked_character' name='{raw_name}' char_key='{char_key}'")
         await bot.process_commands(message)
         return
 
-    # Cooldown per (user, char)
+    # Cooldown
     if not can_payout(linked_uid, char_key):
         if dbg:
-            logger.info(f"debug:earn_skip reason='cooldown' cooldown_s={EARN_COOLDOWN_SECONDS} | {dbg_fields} | {{'user_id': {linked_uid}, 'char_key': '{char_key}'}}")
+            logger.info(f"debug:earn_skip reason='cooldown' cooldown_s={EARN_COOLDOWN_SECONDS} user_id={linked_uid} char_key='{char_key}'")
         await bot.process_commands(message)
         return
 
-    # Success path
+    # Success
     add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
     queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
-
     if dbg:
-        logger.info(f"debug:earn_ok delta='{EARN_PER_MESSAGE.pretty_long()}' | {dbg_fields} | {{'user_id': {linked_uid}, 'char_key': '{char_key}'}}")
+        logger.info(f"debug:earn_ok delta='{EARN_PER_MESSAGE.pretty_long()}' user_id={linked_uid} char_key='{char_key}'")
 
     await bot.process_commands(message)
 
 
 # ---------------- SLASH COMMANDS ----------------
 from discord import app_commands
+
+@bot.tree.command(name="debug_toggle", description="(Staff) Toggle earn debug tracing for this channel/thread.")
+@app_commands.guilds(TEST_GUILD)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def debug_toggle_cmd(interaction: discord.Interaction):
+    ch = interaction.channel
+    cid = getattr(ch, "id", None)
+    if cid in DEBUG_EARNING_CHANNEL_IDS:
+        DEBUG_EARNING_CHANNEL_IDS.remove(cid)
+        await interaction.response.send_message(f"🔇 Debug OFF for <#{cid}>", ephemeral=True)
+    else:
+        DEBUG_EARNING_CHANNEL_IDS.add(cid)
+        await interaction.response.send_message(f"🔊 Debug ON for <#{cid}>", ephemeral=True)
+
 
 @bot.tree.command(name="debug_channel", description="(Staff) Explain why this channel/thread is or isn't allowed for RP earnings.")
 @app_commands.guilds(TEST_GUILD)
