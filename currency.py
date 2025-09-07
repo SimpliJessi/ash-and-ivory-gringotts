@@ -12,6 +12,10 @@ Supports parsing inputs like:
 from __future__ import annotations
 from dataclasses import dataclass
 import re
+import logging
+
+# Child logger (parent configured in bot.py)
+logger = logging.getLogger("gringotts.currency")
 
 # at the top of each file that writes JSON
 import os
@@ -48,10 +52,14 @@ class Money:
             + int(sickles) * KNUTS_PER_SICKLE
             + int(knuts)
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"from_gsk g={galleons} s={sickles} k={knuts} -> knuts={total}")
         return Money(total)
 
     @staticmethod
     def from_knuts(n: int) -> "Money":
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"from_knuts n={n}")
         return Money(int(n))
 
     @staticmethod
@@ -69,6 +77,8 @@ class Money:
         - Any number without a unit (leftover) is treated as knuts.
         """
         if not isinstance(text, str) or not text.strip():
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("from_str:empty_or_nonstring -> 0k")
             return Money.zero()
 
         t = text.lower()
@@ -88,7 +98,12 @@ class Money:
 
         for m in token_re.finditer(t):
             num_txt, unit = m.group(1), m.group(2)
-            num = int(num_txt.replace(",", ""))
+            try:
+                num = int(num_txt.replace(",", ""))
+            except ValueError:
+                # Shouldn't happen due to regex, but guard anyway
+                logger.warning(f"from_str:bad_number token='{num_txt}' unit='{unit}' text='{text}'")
+                continue
             consumed_spans.append(m.span())
 
             if unit.startswith("g"):
@@ -99,45 +114,78 @@ class Money:
                 k += num
 
         # Handle any leftover bare numbers as knuts
-        leftover = t
-        # Remove consumed spans from leftover by masking
         mask = bytearray(b'1' * len(t))
         for a, b in consumed_spans:
             for i in range(a, b):
                 mask[i] = 0
         cleaned = "".join(ch if mask[i] else " " for i, ch in enumerate(t))
-        for part in re.findall(r'[+-]?\d[\d,]*', cleaned):
-            k += int(part.replace(",", ""))
 
-        return Money.from_gsk(g, s, k)
+        leftover_knuts = 0
+        for part in re.findall(r'[+-]?\d[\d,]*', cleaned):
+            try:
+                leftover_knuts += int(part.replace(",", ""))
+            except ValueError:
+                logger.warning(f"from_str:bad_leftover_number part='{part}' text='{text}'")
+
+        total = Money.from_gsk(g, s, k + leftover_knuts)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"from_str text='{text}' -> g={g} s={s} k={k} leftover_k={leftover_knuts} total_knuts={total.knuts}"
+            )
+        return total
 
     # ---------- Arithmetic ----------
     def __add__(self, other: "Money") -> "Money":
-        return Money(self.knuts + other.knuts)
+        if not isinstance(other, Money):
+            logger.warning(f"add:invalid_other type={type(other)}")
+            return NotImplemented  # keeps Python semantics
+        res = Money(self.knuts + other.knuts)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"add {self.knuts}+{other.knuts} -> {res.knuts}")
+        return res
 
     def __sub__(self, other: "Money") -> "Money":
-        return Money(self.knuts - other.knuts)
+        if not isinstance(other, Money):
+            logger.warning(f"sub:invalid_other type={type(other)}")
+            return NotImplemented
+        res = Money(self.knuts - other.knuts)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"sub {self.knuts}-{other.knuts} -> {res.knuts}")
+        return res
 
     def __mul__(self, m: int) -> "Money":
         if not isinstance(m, int):
+            logger.warning(f"mul:type_error m_type={type(m)}")
             raise TypeError("Can only multiply Money by an int.")
-        return Money(self.knuts * m)
+        res = Money(self.knuts * m)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"mul {self.knuts}*{m} -> {res.knuts}")
+        return res
 
     __rmul__ = __mul__
 
     def __floordiv__(self, m: int) -> "Money":
         if not isinstance(m, int):
+            logger.warning(f"floordiv:type_error m_type={type(m)}")
             raise TypeError("Can only floor-divide Money by an int.")
-        return Money(self.knuts // m)
+        res = Money(self.knuts // m)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"floordiv {self.knuts}//{m} -> {res.knuts}")
+        return res
 
     def __mod__(self, m: int) -> "Money":
         if not isinstance(m, int):
+            logger.warning(f"mod:type_error m_type={type(m)}")
             raise TypeError("Can only modulo Money by an int.")
-        return Money(self.knuts % m)
+        res = Money(self.knuts % m)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"mod {self.knuts}%{m} -> {res.knuts}")
+        return res
 
     # ---------- Comparisons ----------
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Money) and self.knuts == other.knuts
+        eq = isinstance(other, Money) and self.knuts == other.knuts
+        return eq
 
     def __lt__(self, other: "Money") -> bool:
         if not isinstance(other, Money):
