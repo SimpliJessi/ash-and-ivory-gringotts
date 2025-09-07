@@ -26,47 +26,64 @@ import threading
 import tempfile
 from typing import Dict, List, Tuple, Optional
 from currency import Money
+import logging
 
-# at the top of each file that writes JSON
-import os
+# Child logger (parent configured in bot.py)
+logger = logging.getLogger("gringotts.bank")
 
-DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# then build your file paths from DATA_DIR, e.g.:
-DB_FILE = os.path.join(DATA_DIR, "balances.json")
-# character_links.json, shops.json, vaults.json, pending_receipts.json, etc. all the same way
-
-
-# Put the DB next to this file (not dependent on cwd)
+# ---------- Storage path ----------
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "balances.json")
-
 
 _lock = threading.Lock()
-
 
 # ---------------- Internal I/O ----------------
 def _load() -> Dict[str, int]:
     if not os.path.exists(DB_FILE):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"load:missing_file path='{DB_FILE}' -> {{}}")
         return {}
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    except json.JSONDecodeError as e:
+        logger.exception(f"load:json_decode_error file='{DB_FILE}': {e}")
+        return {}
+    except Exception as e:
+        logger.exception(f"load:error file='{DB_FILE}': {e}")
+        return {}
+
     # Ensure canonical types
-    return {str(k): int(v) for k, v in data.items()}
+    out: Dict[str, int] = {}
+    bad = 0
+    for k, v in data.items():
+        try:
+            out[str(k)] = int(v)
+        except Exception:
+            bad += 1
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"load:ok count={len(out)} bad={bad}")
+    return out
 
 
 def _atomic_write(data: Dict[str, int]) -> None:
     """Write JSON atomically to avoid partial/corrupt files."""
     dir_ = os.path.dirname(DB_FILE) or "."
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=dir_, encoding="utf-8") as tmp:
-        json.dump(data, tmp, indent=2)
-        tmp_path = tmp.name
-    os.replace(tmp_path, DB_FILE)
+    try:
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=dir_, encoding="utf-8") as tmp:
+            json.dump(data, tmp, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, DB_FILE)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"save:ok path='{DB_FILE}' count={len(data)}")
+    except Exception as e:
+        logger.exception(f"save:error path='{DB_FILE}': {e}")
+        try:
+            if "tmp_path" in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def _save(data: Dict[str, int]) -> None:
@@ -79,49 +96,65 @@ def _k(user_id: int, key: Optional[str]) -> str:
         return f"{user_id}"
     return f"{user_id}:{key.strip().lower()}"
 
-
 # ---------------- Core API (user/character) ----------------
 def get_balance(user_id: int, key: Optional[str] = None) -> Money:
     """Return the balance for (user[, character key]) as Money."""
+    kk = _k(user_id, key)
     with _lock:
         data = _load()
-        return Money(knuts=int(data.get(_k(user_id, key), 0)))
+        v = int(data.get(kk, 0))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"get_balance key='{kk}' knuts={v}")
+    return Money(knuts=v)
 
 
 def set_balance(user_id: int, amount: Money, key: Optional[str] = None) -> None:
     """Set the balance to an exact amount (overwrites)."""
+    kk = _k(user_id, key)
     with _lock:
         data = _load()
-        data[_k(user_id, key)] = int(amount.knuts)
+        data[kk] = int(amount.knuts)
         _save(data)
+    logger.info(f"set_balance key='{kk}' knuts={int(amount.knuts)}")
 
 
 def add_balance(user_id: int, amount: Money, key: Optional[str] = None) -> None:
     """Add (or subtract if negative) to the balance."""
     if amount.knuts == 0:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"add_balance:noop zero_amount user_id={user_id} key='{key}'")
         return
+    kk = _k(user_id, key)
     with _lock:
         data = _load()
-        kk = _k(user_id, key)
         cur = int(data.get(kk, 0))
         data[kk] = cur + int(amount.knuts)
         _save(data)
+    logger.info(
+        f"add_balance key='{kk}' delta_knuts={int(amount.knuts)} new_knuts={cur + int(amount.knuts)} prev_knuts={cur}"
+    )
 
 
 def subtract_if_enough(user_id: int, price: Money, key: Optional[str] = None) -> bool:
     """Subtract `price` iff there is enough balance. Returns True on success."""
     need = int(price.knuts)
     if need <= 0:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"subtract:trivial need={need} user_id={user_id} key='{key}' -> True")
         return True
+
+    kk = _k(user_id, key)
     with _lock:
         data = _load()
-        kk = _k(user_id, key)
         cur = int(data.get(kk, 0))
         if cur < need:
+            logger.info(f"subtract:insufficient key='{kk}' need={need} have={cur} -> False")
             return False
         data[kk] = cur - need
         _save(data)
-        return True
+        newv = cur - need
+    logger.info(f"subtract:ok key='{kk}' need={need} new_knuts={newv} prev_knuts={cur}")
+    return True
 
 
 def transfer(
@@ -137,23 +170,32 @@ def transfer(
     - Returns True if successful, False otherwise (insufficient funds or invalid amount).
     """
     amt = int(amount.knuts)
-    if amt <= 0 or sender_id == receiver_id and (from_key or "") == (to_key or ""):
+    if amt <= 0 or (sender_id == receiver_id and (from_key or "") == (to_key or "")):
+        logger.info(
+            f"transfer:invalid amt={amt} sender={sender_id} receiver={receiver_id} from='{from_key}' to='{to_key}'"
+        )
         return False
 
+    s_key = _k(sender_id, from_key)
+    r_key = _k(receiver_id, to_key)
     with _lock:
         data = _load()
-        s_key = _k(sender_id, from_key)
-        r_key = _k(receiver_id, to_key)
-
         s_cur = int(data.get(s_key, 0))
         if s_cur < amt:
+            logger.info(
+                f"transfer:insufficient sender_key='{s_key}' have={s_cur} need={amt} -> False"
+            )
             return False
 
         data[s_key] = s_cur - amt
         data[r_key] = int(data.get(r_key, 0)) + amt
         _save(data)
-        return True
-
+        r_new = int(data[r_key])
+    logger.info(
+        f"transfer:ok sender_key='{s_key}' -> receiver_key='{r_key}' amt={amt} "
+        f"sender_new={s_cur - amt} receiver_new={r_new}"
+    )
+    return True
 
 # ---------------- Introspection & Utilities ----------------
 def user_total(user_id: int) -> Money:
@@ -165,9 +207,10 @@ def user_total(user_id: int) -> Money:
     with _lock:
         data = _load()
     for k, v in data.items():
-        # user-level exact key or any user_id:character key
         if k == uid_prefix or k.startswith(uid_prefix + ":"):
             total += int(v)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"user_total user_id={user_id} knuts={total}")
     return Money(knuts=total)
 
 
@@ -184,6 +227,8 @@ def character_balances(user_id: int) -> Dict[str, Money]:
         if k.startswith(uid_prefix):
             char_key = k[len(uid_prefix):]
             out[char_key] = Money(knuts=int(v))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"character_balances user_id={user_id} count={len(out)}")
     return out
 
 
@@ -197,11 +242,15 @@ def rename_character_key(user_id: int, old_key: str, new_key: str) -> bool:
     with _lock:
         data = _load()
         if oldk not in data or newk in data:
+            logger.info(
+                f"rename_key:failed user_id={user_id} old='{oldk}' new='{newk}' "
+                f"exists_old={oldk in data} exists_new={newk in data}"
+            )
             return False
         data[newk] = data.pop(oldk)
         _save(data)
-        return True
-
+    logger.info(f"rename_key:ok user_id={user_id} old='{oldk}' new='{newk}'")
+    return True
 
 # ---------------- Leaderboards ----------------
 def top_users(n: int = 10) -> List[Tuple[int, Money]]:
@@ -212,16 +261,17 @@ def top_users(n: int = 10) -> List[Tuple[int, Money]]:
     with _lock:
         data = _load()
 
-    # Aggregate totals per user
     totals: Dict[int, int] = {}
     for k, v in data.items():
-        # key is either "user" or "user:char"
         uid_str = k.split(":", 1)[0]
         uid = int(uid_str)
         totals[uid] = totals.get(uid, 0) + int(v)
 
     ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
-    return [(uid, Money(knuts=knuts)) for uid, knuts in ranked[:max(1, n)]]
+    res = [(uid, Money(knuts=knuts)) for uid, knuts in ranked[:max(1, n)]]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"top_users n={n} returned={len(res)}")
+    return res
 
 
 def top_characters(n: int = 10) -> List[Tuple[int, str, Money]]:
@@ -237,4 +287,7 @@ def top_characters(n: int = 10) -> List[Tuple[int, str, Money]]:
             uid_str, char_key = k.split(":", 1)
             out.append((int(uid_str), char_key, Money(knuts=int(v))))
     out.sort(key=lambda t: t[2].knuts, reverse=True)
-    return out[:max(1, n)]
+    res = out[:max(1, n)]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"top_characters n={n} returned={len(res)}")
+    return res
