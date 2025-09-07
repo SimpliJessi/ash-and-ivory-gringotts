@@ -3,55 +3,78 @@ from __future__ import annotations
 import os, json, tempfile
 from typing import Dict, List, Optional, Tuple
 from currency import Money
+import logging
 
-# at the top of each file that writes JSON
-import os
+# Child logger (parent configured in bot.py)
+logger = logging.getLogger("gringotts.shop")
 
+# ---------- Storage path ----------
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# then build your file paths from DATA_DIR, e.g.:
-DB_FILE = os.path.join(DATA_DIR, "balances.json")
-# character_links.json, shops.json, vaults.json, pending_receipts.json, etc. all the same way
-
-
-DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_FILE = os.path.join(DATA_DIR, "shops.json")
-
+SHOPS_FILE = os.path.join(DATA_DIR, "shops.json")
 
 # ---------------- Storage helpers ----------------
 def _load() -> dict:
     if not os.path.exists(SHOPS_FILE):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"load:missing_file path='{SHOPS_FILE}' -> {{}}")
         return {}
     try:
         with open(SHOPS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
+            data = json.load(f)
+            if logger.isEnabledFor(logging.DEBUG):
+                # rough counts for visibility
+                towns = len(data)
+                shops = sum(len(v) for v in data.values() if isinstance(v, dict))
+                items = sum(len(v.get("items", {})) for t in data.values() for v in ([t] if isinstance(t, dict) else []) for _k in [1])
+                logger.debug(f"load:ok path='{SHOPS_FILE}' towns={towns} shops≈{shops}")
+            return data
+    except json.JSONDecodeError as e:
+        logger.exception(f"load:json_decode_error file='{SHOPS_FILE}': {e}")
+        return {}
+    except Exception as e:
+        logger.exception(f"load:error file='{SHOPS_FILE}': {e}")
         return {}
 
 def _save_atomic(data: dict) -> None:
     d = os.path.dirname(SHOPS_FILE) or "."
-    tmp = os.path.join(d, f".tmp_{os.path.basename(SHOPS_FILE)}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, SHOPS_FILE)
+    try:
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=d, encoding="utf-8") as tmp:
+            json.dump(data, tmp, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, SHOPS_FILE)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"save:ok path='{SHOPS_FILE}'")
+    except Exception as e:
+        logger.exception(f"save:error path='{SHOPS_FILE}': {e}")
+        try:
+            if "tmp_path" in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 def _ensure_path(data: dict, town: str, shop: str) -> dict:
     t = data.setdefault(town, {})
     s = t.setdefault(shop, {})
-    inv = s.setdefault("items", {})  # item -> {"price_knuts": int, "qty": int}
+    inv = s.setdefault("items", {})  # item -> {"price_knuts": int, "qty": int|None}
     return inv
 
 # ---------------- Public API ----------------
 def list_towns() -> List[str]:
     data = _load()
-    return sorted(data.keys())
+    towns = sorted(data.keys())
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"list_towns -> {len(towns)} towns")
+    return towns
 
 def list_shops(town: str) -> List[str]:
     data = _load()
     t = data.get(town, {})
-    return sorted(t.keys())
+    shops = sorted(t.keys())
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"list_shops town='{town}' -> {len(shops)} shops")
+    return shops
 
 def list_items(town: str, shop: str) -> List[Tuple[str, Money, Optional[int]]]:
     """
@@ -65,17 +88,25 @@ def list_items(town: str, shop: str) -> List[Tuple[str, Money, Optional[int]]]:
         qty = meta.get("qty", None)
         out.append((name, Money(knuts=price_knuts), None if qty is None else int(qty)))
     out.sort(key=lambda x: x[0].lower())
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"list_items town='{town}' shop='{shop}' -> {len(out)} items")
     return out
 
 def get_item(town: str, shop: str, item: str) -> Optional[dict]:
     data = _load()
-    return data.get(town, {}).get(shop, {}).get("items", {}).get(item)
+    meta = data.get(town, {}).get(shop, {}).get("items", {}).get(item)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"get_item town='{town}' shop='{shop}' item='{item}' -> {'hit' if meta else 'miss'}")
+    return meta
 
 def get_price(town: str, shop: str, item: str) -> Optional[Money]:
     meta = get_item(town, shop, item)
     if not meta:
         return None
-    return Money(knuts=int(meta.get("price_knuts", 0)))
+    price = Money(knuts=int(meta.get("price_knuts", 0)))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"get_price town='{town}' shop='{shop}' item='{item}' -> {price.knuts} knuts")
+    return price
 
 def set_item(town: str, shop: str, item: str, price: Money, qty: Optional[int]) -> None:
     """
@@ -83,21 +114,29 @@ def set_item(town: str, shop: str, item: str, price: Money, qty: Optional[int]) 
     """
     data = _load()
     inv = _ensure_path(data, town, shop)
+    prev = inv.get(item)
     inv[item] = {"price_knuts": int(price.knuts), "qty": None if qty is None else int(qty)}
     _save_atomic(data)
+    if prev is None:
+        logger.info(f"item:set town='{town}' shop='{shop}' item='{item}' price_knuts={int(price.knuts)} qty={'∞' if qty is None else int(qty)}")
+    else:
+        logger.info(f"item:update town='{town}' shop='{shop}' item='{item}' price_knuts={int(price.knuts)} qty={'∞' if qty is None else int(qty)} prev={prev}")
 
 def restock_item(town: str, shop: str, item: str, delta_qty: int) -> bool:
     data = _load()
     inv = data.get(town, {}).get(shop, {}).get("items", {})
     meta = inv.get(item)
     if not meta:
+        logger.info(f"restock:miss town='{town}' shop='{shop}' item='{item}' delta={delta_qty}")
         return False
     if meta.get("qty") is None:
+        logger.info(f"restock:unlimited town='{town}' shop='{shop}' item='{item}' delta={delta_qty} -> no-op (∞)")
         return True  # unlimited, nothing to change
-    meta["qty"] = int(meta.get("qty", 0)) + int(delta_qty)
-    if meta["qty"] < 0:
-        meta["qty"] = 0
+    old = int(meta.get("qty", 0))
+    new = max(0, old + int(delta_qty))
+    meta["qty"] = new
     _save_atomic(data)
+    logger.info(f"restock:ok town='{town}' shop='{shop}' item='{item}' delta={delta_qty} qty_old={old} qty_new={new}")
     return True
 
 def set_price(town: str, shop: str, item: str, price: Money) -> bool:
@@ -105,18 +144,23 @@ def set_price(town: str, shop: str, item: str, price: Money) -> bool:
     inv = data.get(town, {}).get(shop, {}).get("items", {})
     meta = inv.get(item)
     if not meta:
+        logger.info(f"price:miss town='{town}' shop='{shop}' item='{item}'")
         return False
+    old = int(meta.get("price_knuts", 0))
     meta["price_knuts"] = int(price.knuts)
     _save_atomic(data)
+    logger.info(f"price:ok town='{town}' shop='{shop}' item='{item}' old_knuts={old} new_knuts={int(price.knuts)}")
     return True
 
 def remove_item(town: str, shop: str, item: str) -> bool:
     data = _load()
     inv = data.get(town, {}).get(shop, {}).get("items", {})
     if item in inv:
-        inv.pop(item, None)
+        removed = inv.pop(item, None)
         _save_atomic(data)
+        logger.info(f"item:remove town='{town}' shop='{shop}' item='{item}' removed={removed}")
         return True
+    logger.info(f"item:remove_miss town='{town}' shop='{shop}' item='{item}'")
     return False
 
 def buy_item(town: str, shop: str, item: str, qty: int) -> Optional[Money]:
@@ -129,15 +173,26 @@ def buy_item(town: str, shop: str, item: str, qty: int) -> Optional[Money]:
     inv = data.get(town, {}).get(shop, {}).get("items", {})
     meta = inv.get(item)
     if not meta:
+        logger.info(f"buy:miss town='{town}' shop='{shop}' item='{item}' qty={qty}")
         return None
+
     price_knuts = int(meta.get("price_knuts", 0))
     stock = meta.get("qty", None)  # None = unlimited
     if stock is not None:
-        if int(stock) < qty:
+        stock = int(stock)
+        if stock < qty:
+            logger.info(f"buy:insufficient town='{town}' shop='{shop}' item='{item}' have={stock} need={qty}")
             return None
-        meta["qty"] = int(stock) - qty
-    total = Money(knuts=price_knuts * qty)
+        meta["qty"] = stock - qty
+
+    total_knuts = price_knuts * qty
+    total = Money(knuts=total_knuts)
     _save_atomic(data)
+
+    logger.info(
+        f"buy:ok town='{town}' shop='{shop}' item='{item}' qty={qty} "
+        f"unit_knuts={price_knuts} total_knuts={total_knuts} new_stock={'∞' if meta.get('qty') is None else meta.get('qty')}"
+    )
     return total
 
 # --------- Optional: seed helpers for testing ---------
