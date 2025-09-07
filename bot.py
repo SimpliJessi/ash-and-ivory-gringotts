@@ -85,6 +85,16 @@ ALLOWED_CHANNEL_IDS: set[int] = {
     1406803659202887862, # Chaos Testing Center
 }
 
+# ---------------- OPTIONAL IGNORE LISTS FOR WEBHOOKS ----------------
+# If you have utility webhooks (dice rollers, card bots, etc.) that should never count,
+# add them here by webhook_id or display name.
+IGNORED_WEBHOOK_IDS: set[int] = {
+    1130656856990289961,  # Wizarding Cards (example from your log)
+}
+IGNORED_WEBHOOK_NAMES: set[str] = {
+    "Wizarding Cards",
+}
+
 # Channels for Gringotts Bank
 GRINGOTTS_FORUM_ID = 1393690306410450975  # test forum ID
 
@@ -315,81 +325,55 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    try:
-        # Ignore ourselves
-        if message.author.id == bot.user.id:
-            return
+    # Ignore ourselves
+    if message.author.id == bot.user.id:
+        return
 
-        ctx = _msg_ctx(message)
-
-        # Only award for webhook messages (Tupperbox/proxy)
-        if not message.webhook_id:
-            logger.debug(f"skip:not_webhook | {ctx}")
-            await bot.process_commands(message)
-            return
-
-        # Derive normalized character key and resolve owner
-        raw_name = message.author.name or ""
-        char_key = normalize_display_name(raw_name)
-        linked_uid = resolve_character(raw_name)
-
-        if not linked_uid:
-            logger.info(f"skip:unlinked_character name='{raw_name}' char_key='{char_key}' | {ctx}")
-            await bot.process_commands(message)
-            return
-
-        # Channel allowlist check
-        ids_checked = _allowed_channel_ids_for(message)
-        if not is_earning_channel(message):
-            logger.info(
-                f"skip:channel_not_allowed ids_checked={ids_checked} allowed={list(ALLOWED_CHANNEL_IDS)} | {ctx}"
-            )
-            await bot.process_commands(message)
-            return
-
-        # Min length check
-        content = (message.content or "").strip()
-        if len(content) < MIN_MESSAGE_LENGTH:
-            logger.info(
-                f"skip:too_short len={len(content)} min_required={MIN_MESSAGE_LENGTH} "
-                f"name='{raw_name}' char_key='{char_key}' | {ctx}"
-            )
-            await bot.process_commands(message)
-            return
-
-        # Cooldown check (per user+character)
-        now = time.time()
-        key = (linked_uid, (char_key or "").lower())
-        last = last_earn_at.get(key, 0.0)
-        elapsed = now - last
-        if elapsed < EARN_COOLDOWN_SECONDS:
-            logger.debug(
-                f"skip:cooldown elapsed={elapsed:.2f}s required={EARN_COOLDOWN_SECONDS}s "
-                f"user_id={linked_uid} char_key='{char_key}' | {ctx}"
-            )
-            await bot.process_commands(message)
-            return
-
-        # Passed all gates: record and queue
-        last_earn_at[key] = now
-
-        add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
-        queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
-
-        logger.info(
-            f"earn:queued amount='{EARN_PER_MESSAGE.pretty_long()}' "
-            f"user_id={linked_uid} char_key='{char_key}' msg_len={len(content)} | {ctx}"
-        )
-
+    # Only award for proxied/webhook messages (Tupperbox etc.)
+    if not message.webhook_id:
         await bot.process_commands(message)
+        return
 
-    except Exception:
-        # Never break message flow—log and continue
-        logger.exception(f"on_message_exception | {_msg_ctx(message)}")
-        try:
-            await bot.process_commands(message)
-        except Exception:
-            logger.exception("process_commands_exception")
+    # Hard-ignore specific utility webhooks (optional)
+    if message.webhook_id in IGNORED_WEBHOOK_IDS or (message.author.name or "") in IGNORED_WEBHOOK_NAMES:
+        await bot.process_commands(message)
+        return
+
+    # EARLY FILTER: channel allowlist first (avoid logging/link lookups outside RP areas)
+    if not is_earning_channel(message):
+        await bot.process_commands(message)
+        return
+
+    # EARLY FILTER: content length before anything else to avoid noise for empty utility posts
+    content = (message.content or "").strip()
+    if len(content) < MIN_MESSAGE_LENGTH:
+        await bot.process_commands(message)
+        return
+
+    # Now derive character and owner (only for messages that *could* earn)
+    raw_name = message.author.name or ""
+    char_key = normalize_display_name(raw_name)
+    linked_uid = resolve_character(raw_name)
+    if not linked_uid:
+        # Silent skip; if you really want visibility, downgrade to DEBUG-level logging in your logger.
+        # logger.debug(f"skip:unlinked_character name='{raw_name}' char_key='{char_key}' ...")
+        await bot.process_commands(message)
+        return
+
+    # Per-user+character cooldown
+    if not can_payout(linked_uid, char_key):
+        await bot.process_commands(message)
+        return
+
+    # Credit immediately (so balances stay current)...
+    add_balance(linked_uid, EARN_PER_MESSAGE, key=char_key)
+    # ...and queue the receipt for the daily UTC summary
+    queue_rp_earning(message.guild.id, linked_uid, char_key, EARN_PER_MESSAGE.knuts)
+
+    print(f"[EARN] +{EARN_PER_MESSAGE.pretty_long()} -> {linked_uid}:{char_key} (queued for daily receipt)")
+
+    await bot.process_commands(message)
+
 
 # ---------------- SLASH COMMANDS ----------------
 from discord import app_commands
