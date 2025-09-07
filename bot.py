@@ -131,10 +131,8 @@ STARTER_FUNDS = Money.from_str("50g")   # starting balance for a newly linked ch
 DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
 
 # Track channels/threads where we want deep diagnostics (toggle with /debug_toggle).
-DEBUG_EARNING_CHANNEL_IDS: set[int] = {
-    # Example: add a thread ID or its parent forum ID here while testing
-    # 1411901315185119252,
-}
+DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # <-- must be set(), not {}
+
 
 def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
     if DEBUG_EARN_ALL:
