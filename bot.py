@@ -265,15 +265,25 @@ def queue_rp_earning(guild_id: int, user_id: int, char_key: str, delta_knuts: in
 
     _pending_save_atomic(data)
 
-def is_earning_channel_with_details(message: discord.Message) -> tuple[bool, dict]:
-    """Return (allowed?, details) showing exactly what we checked."""
-    ch = message.channel  # TextChannel, Thread, or ForumChannel
+# Replace your existing is_earning_channel_with_details(...) with this:
+
+from typing import Tuple, Dict
+
+def is_earning_channel_with_details(
+    ch: discord.abc.GuildChannel | discord.Thread
+) -> Tuple[bool, Dict]:
+    """
+    Accepts a Channel or Thread object and returns (allowed?, details).
+    Checks the channel, its parent (for threads), and their categories against ALLOWED_CHANNEL_IDS.
+    """
     ids_to_check: list[int] = []
 
+    # The object itself
     ids_to_check.append(getattr(ch, "id", None))
     ids_to_check.append(getattr(ch, "parent_id", None))
     ids_to_check.append(getattr(ch, "category_id", None))
 
+    # Parent (e.g., thread.parent is the Forum/Text channel)
     parent = getattr(ch, "parent", None)
     if parent is not None:
         ids_to_check.append(getattr(parent, "id", None))
@@ -290,13 +300,14 @@ def is_earning_channel_with_details(message: discord.Message) -> tuple[bool, dic
         "channel_id": getattr(ch, "id", None),
         "parent_id": getattr(ch, "parent_id", None),
         "category_id": getattr(ch, "category_id", None),
-        "parent_type": type(parent).__name__ if parent else None,
-        "parent_category_id": getattr(parent, "category_id", None) if parent else None,
+        "parent_type": (type(parent).__name__ if parent else None),
+        "parent_category_id": (getattr(parent, "category_id", None) if parent else None),
         "ids_checked": ids_to_check,
         "ids_matched": matched,
         "allowed": allowed,
     }
     return allowed, details
+
 
 
 def is_earning_channel(message: discord.Message) -> bool:
@@ -412,7 +423,7 @@ async def on_message(message: discord.Message):
     }
 
     # EARLY: channel allowlist
-    allowed, ch_details = is_earning_channel_with_details(message)
+    allowed, ch_details = is_earning_channel_with_details(message.channel)
     if not allowed:
         if dbg:
             logger.info(f"debug:earn_skip reason='channel_not_allowed' | {dbg_fields} | {ch_details}")
@@ -462,17 +473,19 @@ from discord import app_commands
 @app_commands.checks.has_permissions(manage_guild=True)
 async def debug_channel_cmd(interaction: discord.Interaction):
     allowed, details = is_earning_channel_with_details(interaction.channel)
+
     lines = [
-        f"**Allowed:** {allowed}",
+        f"**Allowed:** {details['allowed']}",
         f"Channel type: `{details['channel_type']}`  (id: `{details['channel_id']}`)",
         f"Parent type: `{details['parent_type']}`  (id: `{details['parent_id']}`)",
         f"Category id: `{details['category_id']}`",
         f"Parent category id: `{details['parent_category_id']}`",
         f"Checked IDs: `{details['ids_checked']}`",
         f"Matched IDs: `{details['ids_matched']}`",
-        f"Configured ALLOW list size: `{len(ALLOWED_CHANNEL_IDS)}`",
+        f"ALLOW list size: `{len(ALLOWED_CHANNEL_IDS)}`",
     ]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
 
 
 @bot.tree.command(name="hello", description="Test command to verify sync.")
