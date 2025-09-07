@@ -69,7 +69,7 @@ TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 
 # Channels where messages earn money (include forum PARENT channel IDs)
 ALLOWED_CHANNEL_IDS: set[int] = {
-    1398762545430401155, # Events
+    1411901315185119252, # Witche's Market
     1393688264531247277, # Hogwarts Grounds
     1393683936009257141, # Hogwarts Castle
     1393687041212153886, # Slytherin Common Room
