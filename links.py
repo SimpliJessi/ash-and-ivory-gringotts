@@ -23,38 +23,19 @@ import threading
 import tempfile
 import unicodedata
 from typing import Dict, Optional
+import logging
 
-# at the top of each file that writes JSON
-import os
-
-DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
-os.makedirs(DATA_DIR, exist_ok=True)
+# Child logger that flows into the parent "gringotts" logger configured in bot.py
+logger = logging.getLogger("gringotts.links")
 
 # ---------- Storage path ----------
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "character_links.json")
 
-
 _lock = threading.Lock()
 
 # ---------- Normalization helpers ----------
-def _normalize_or_fail(name: str) -> str:
-    key = normalize_display_name(name)
-    if not key:
-        # Fallback: try a “softer” normalization so pure emoji names don’t collapse to empty
-        soft = _nfkc_lower(name)
-        soft = re.sub(r"\s+", " ", soft).strip()
-        # Keep only letters/digits/spaces/'/-
-        soft = re.sub(r"[^a-z0-9\s'\-]", "", soft)
-        soft = re.sub(r"\s+", " ", soft).strip()
-        if soft:
-            return soft
-        # Still empty? Refuse to link.
-        raise ValueError("Character name normalizes to empty; please add at least one letter/number.")
-    return key
-
-
 def _nfkc_lower(s: str) -> str:
     """Base normalize + lowercase + trim."""
     return unicodedata.normalize("NFKC", (s or "")).lower().strip()
@@ -66,21 +47,21 @@ _BRACKETS_RE = re.compile(r"\s*[\(\[\{].*?[\)\]\}]\s*$")
 
 # Emoji / pictograph ranges (broad but safe)
 _EMOJI_RE = re.compile(
-    "["                                 # start char class
-    "\U0001F1E6-\U0001F1FF"             # flags
-    "\U0001F300-\U0001F5FF"             # symbols & pictographs
-    "\U0001F600-\U0001F64F"             # emoticons
-    "\U0001F680-\U0001F6FF"             # transport & map
-    "\U0001F700-\U0001F77F"             # alchemical
+    "["
+    "\U0001F1E6-\U0001F1FF"  # flags
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F700-\U0001F77F"  # alchemical
     "\U0001F780-\U0001F7FF"
     "\U0001F800-\U0001F8FF"
     "\U0001F900-\U0001F9FF"
     "\U0001FA00-\U0001FAFF"
-    "\U00002700-\U000027BF"             # dingbats
-    "\U00002600-\U000026FF"             # misc symbols
-    "\U00002B00-\U00002BFF"             # arrows etc
+    "\U00002700-\U000027BF"  # dingbats
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U00002B00-\U00002BFF"  # arrows etc
     "]",
-    flags=re.UNICODE
+    flags=re.UNICODE,
 )
 
 def _strip_variations_and_zwj(s: str) -> str:
@@ -101,7 +82,8 @@ def normalize_display_name(name: str) -> str:
     - split on common separators and take left-most
     - keep only letters/digits/space/'/-, collapse spaces
     """
-    s = _nfkc_lower(name)
+    raw = name or ""
+    s = _nfkc_lower(raw)
     s = _strip_variations_and_zwj(s)
     s = _strip_combining(s)
     s = _EMOJI_RE.sub("", s)
@@ -122,7 +104,25 @@ def normalize_display_name(name: str) -> str:
     s = re.sub(r"[^a-z0-9\s'\-]", " ", s)
     # Collapse whitespace
     s = re.sub(r"\s+", " ", s).strip()
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"normalize: raw='{raw}' -> key='{s}'")
     return s
+
+def _normalize_or_fail(name: str) -> str:
+    key = normalize_display_name(name)
+    if not key:
+        # Fallback: try a “softer” normalization so pure emoji names don’t collapse to empty
+        soft = _nfkc_lower(name)
+        soft = re.sub(r"\s+", " ", soft).strip()
+        soft = re.sub(r"[^a-z0-9\s'\-]", "", soft)
+        soft = re.sub(r"\s+", " ", soft).strip()
+        if soft:
+            logger.info(f"normalize:empty_strict_using_soft key='{soft}' raw='{name}'")
+            return soft
+        logger.warning(f"normalize:failed_empty raw='{name}'")
+        raise ValueError("Character name normalizes to empty; please add at least one letter/number.")
+    return key
 
 def _norm_variants(name: str) -> list[str]:
     """
@@ -135,70 +135,115 @@ def _norm_variants(name: str) -> list[str]:
     return [a] if a == b else [a, b]
 
 # ---------- Disk I/O (thread-safe & atomic) ----------
-
 def _load() -> Dict[str, int]:
     """Load the mapping {normalized_name: user_id} from disk."""
     if not os.path.exists(DB_FILE):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"load:missing_file path='{DB_FILE}' -> {{}}")
         return {}
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(DB_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    except json.JSONDecodeError as e:
+        logger.exception(f"load:json_decode_error file='{DB_FILE}': {e}")
+        return {}
+    except Exception as e:
+        logger.exception(f"load:error file='{DB_FILE}': {e}")
+        return {}
+
     # Ensure canonical types
-    return {str(k): int(v) for k, v in data.items()}
+    out = {}
+    for k, v in data.items():
+        try:
+            out[str(k)] = int(v)
+        except Exception:
+            logger.warning(f"load:bad_entry key='{k}' value='{v}' (skipped)")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"load:ok count={len(out)}")
+    return out
 
 def _atomic_write(data: Dict[str, int]) -> None:
     """Write JSON atomically to avoid partial/corrupt files."""
     dir_ = os.path.dirname(DB_FILE) or "."
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=dir_, encoding="utf-8") as tmp:
-        json.dump(data, tmp, indent=2)
-        tmp_path = tmp.name
-    os.replace(tmp_path, DB_FILE)
+    try:
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=dir_, encoding="utf-8") as tmp:
+            json.dump(data, tmp, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, DB_FILE)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"save:ok path='{DB_FILE}' count={len(data)}")
+    except Exception as e:
+        logger.exception(f"save:error path='{DB_FILE}': {e}")
+        # Best-effort cleanup for temp file if it still exists
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 def _save(data: Dict[str, int]) -> None:
     _atomic_write(data)
 
 # ---------- Public API ----------
-
 def link_character(name: str, user_id: int) -> None:
     key = _normalize_or_fail(name)
     with _lock:
         data = _load()
+        old = data.get(key)
         data[key] = int(user_id)
         _save(data)
+    if old is None:
+        logger.info(f"link:set key='{key}' user_id={user_id}")
+    elif old != int(user_id):
+        logger.warning(f"link:overwrite key='{key}' old_user_id={old} new_user_id={user_id}")
+    else:
+        logger.debug(f"link:idempotent key='{key}' user_id={user_id}")
 
 def link_alias(alias_name: str, user_id: int) -> None:
     key = _normalize_or_fail(alias_name)
     with _lock:
         data = _load()
+        old = data.get(key)
         data[key] = int(user_id)
         _save(data)
-
+    if old is None:
+        logger.info(f"alias:set key='{key}' user_id={user_id}")
+    elif old != int(user_id):
+        logger.warning(f"alias:overwrite key='{key}' old_user_id={old} new_user_id={user_id}")
+    else:
+        logger.debug(f"alias:idempotent key='{key}' user_id={user_id}")
 
 def unlink_character(name: str) -> bool:
     """Remove a link. Returns True if it existed."""
     candidates = _norm_variants(name)
+    removed: list[str] = []
     with _lock:
         data = _load()
-        existed = False
         for k in candidates:
             if k in data:
-                existed = True
+                removed.append(k)
                 data.pop(k, None)
-        if existed:
+        if removed:
             _save(data)
-        return existed
+    if removed:
+        logger.info(f"unlink:removed keys={removed}")
+        return True
+    else:
+        logger.debug(f"unlink:not_found candidates={candidates}")
+        return False
 
 def resolve_character(name: str) -> Optional[int]:
+    strict = normalize_display_name(name)
+    soft = _nfkc_lower(name)
     with _lock:
         data = _load()
-    # Try smart-normalized first (most strict), then soft-lowered variant
-    for k in (normalize_display_name(name), _nfkc_lower(name)):
+    for k in (strict, soft):
         if k and k in data:
-            return int(data[k])
+            uid = int(data[k])
+            logger.debug(f"resolve:hit key='{k}' user_id={uid} (strict='{strict}', soft='{soft}')")
+            return uid
+    logger.debug(f"resolve:miss strict='{strict}' soft='{soft}'")
     return None
-
 
 def all_links() -> Dict[str, int]:
     """
@@ -206,10 +251,12 @@ def all_links() -> Dict[str, int]:
     Keys are smart-normalized display names.
     """
     with _lock:
-        return dict(_load())
+        data = _load()
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"all_links:count={len(data)}")
+    return dict(data)
 
 # ---------- Optional: debugging helper ----------
-
 def debug_dump() -> str:
     """Return a human-readable dump of all links (one per line)."""
     with _lock:
