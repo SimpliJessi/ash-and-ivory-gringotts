@@ -189,6 +189,10 @@ MIN_MESSAGE_LENGTH = 500                    # minimum characters to count
 
 STARTER_FUNDS = Money.from_str("50g")   # starting balance for a newly linked character
 
+# Staff shop log channel (Text Channel or Thread ID)
+STAFF_SHOP_LOG_CHANNEL_ID = int(os.getenv("STAFF_SHOP_LOG_CHANNEL_ID", "0")) or None
+
+
 # ---------------- BOT SETUP ----------------
 intents = discord.Intents.default()
 intents.message_content = True   # to read message content length
@@ -199,6 +203,70 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 last_earn_at: dict[tuple[int, str], float] = {}
 
 # ---------------- HELPERS ----------------
+
+async def _post_shop_log(
+    guild: discord.Guild,
+    action: str,             # "Add", "Update", or "Remove"
+    shop: str,
+    item: str,
+    by: discord.Member | None,
+    new_price_knuts: int | None = None,
+    new_stock: int | None | None = None,   # None => unlimited; int => count; -1 => not-applicable
+    old_price_knuts: int | None = None,
+    old_stock: int | None | None = None,   # None => unlimited; int => count; -1 => not-applicable
+):
+    """
+    Posts an embed to STAFF_SHOP_LOG_CHANNEL_ID if configured.
+    """
+    if not STAFF_SHOP_LOG_CHANNEL_ID:
+        return  # silently skip if not configured
+
+    ch = guild.get_channel(STAFF_SHOP_LOG_CHANNEL_ID) or await guild.fetch_channel(STAFF_SHOP_LOG_CHANNEL_ID)
+    if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+        return  # bad channel id or missing perms
+
+    def _fmt_price(kn: int | None) -> str:
+        if kn is None: 
+            return "—"
+        return Money(kn).pretty_long()
+
+    def _fmt_stock(st) -> str:
+        if st is None: 
+            return "∞"
+        if st == -1:
+            return "—"
+        return str(st)
+
+    color = {
+        "Add": discord.Color.green(),
+        "Update": discord.Color.blurple(),
+        "Remove": discord.Color.red(),
+    }.get(action, discord.Color.greyple())
+
+    title = f"{action} Item"
+    e = discord.Embed(title=title, color=color, timestamp=datetime.datetime.utcnow())
+    e.add_field(name="Shop", value=shop, inline=True)
+    e.add_field(name="Item", value=item, inline=True)
+
+    # Old → New rows when applicable
+    if action in ("Add", "Update"):
+        e.add_field(name="Price (new)", value=_fmt_price(new_price_knuts), inline=True)
+        e.add_field(name="Stock (new)", value=_fmt_stock(new_stock), inline=True)
+        if old_price_knuts is not None or old_stock is not None:
+            e.add_field(name="Price (old)", value=_fmt_price(old_price_knuts), inline=True)
+            e.add_field(name="Stock (old)", value=_fmt_stock(old_stock), inline=True)
+    else:  # Remove
+        e.add_field(name="Price", value=_fmt_price(old_price_knuts), inline=True)
+        e.add_field(name="Stock", value=_fmt_stock(old_stock), inline=True)
+
+    if by:
+        e.set_footer(text=f"By {by.display_name} • ID {by.id}")
+
+    try:
+        await ch.send(embed=e)
+    except Exception:
+        # Avoid crashing command flows if channel perms are missing
+        logger.exception("Failed to post shop log embed")
 
 # ---------------- SHOP HELPERS (simple JSON store) ----------------
 def _shops_load() -> dict:
@@ -520,7 +588,7 @@ async def on_message(message: discord.Message):
     shop="Shop name (e.g., 'Honeydukes')",
     item="Item name (e.g., 'Chocolate Frog')",
     price="Price (e.g., '2g 5s', '15s', or '300k')",
-    stock="Stock quantity; use 0 for none, negative for unlimited"
+    stock="Stock quantity; use negative for unlimited"
 )
 async def add_item_cmd(
     interaction: discord.Interaction,
@@ -538,7 +606,12 @@ async def add_item_cmd(
         )
         return
 
-    # Interpret stock: negative → unlimited; 0+ → exact amount
+    # Check before/after to decide Add vs Update + log diffs
+    existing = _get_item(shop, item)  # may be None
+    old_price_knuts = existing["price_knuts"] if existing else None
+    old_stock = existing["stock"] if existing else None
+
+    # Interpret stock: negative → unlimited; else exact
     stock_value: int | None = None if stock < 0 else stock
 
     _set_item(shop, item, money, stock_value)
@@ -548,6 +621,19 @@ async def add_item_cmd(
         f"✅ Set **{item}** in **{shop}** at **{money.pretty_long()}** (stock: {stock_text}).",
         ephemeral=True
     )
+
+    await _post_shop_log(
+        interaction.guild,
+        "Update" if existing else "Add",
+        shop,
+        item,
+        interaction.user if isinstance(interaction.user, discord.Member) else None,
+        new_price_knuts=int(money.knuts),
+        new_stock=stock_value,
+        old_price_knuts=old_price_knuts,
+        old_stock=old_stock,
+    )
+
 
 @bot.tree.command(name="remove_item", description="(Staff) Remove an item from a shop.")
 @app_commands.guilds(TEST_GUILD)
@@ -561,6 +647,11 @@ async def remove_item_cmd(
     shop: str,
     item: str
 ):
+    existing = _get_item(shop, item)
+    if not existing:
+        await interaction.response.send_message("❌ Item not found.", ephemeral=True)
+        return
+
     ok = _remove_item(shop, item)
     if not ok:
         await interaction.response.send_message("❌ Item not found.", ephemeral=True)
@@ -570,6 +661,19 @@ async def remove_item_cmd(
         f"🗑️ Removed **{item}** from **{shop}**.",
         ephemeral=True
     )
+
+    await _post_shop_log(
+        interaction.guild,
+        "Remove",
+        shop,
+        item,
+        interaction.user if isinstance(interaction.user, discord.Member) else None,
+        new_price_knuts=None,
+        new_stock=-1,  # not applicable
+        old_price_knuts=existing.get("price_knuts"),
+        old_stock=existing.get("stock"),
+    )
+
 
 # (Optional) wire autocompletes
 @add_item_cmd.autocomplete("shop")
