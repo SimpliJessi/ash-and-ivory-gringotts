@@ -268,7 +268,9 @@ async def _post_shop_log(
         # Avoid crashing command flows if channel perms are missing
         logger.exception("Failed to post shop log embed")
 
-# ---------------- SHOP HELPERS (simple JSON store) ----------------
+# ---------------- SHOP HELPERS (JSON store with stock math) ----------------
+SHOPS_FILE = os.path.join(DATA_DIR, "shops.json")
+
 def _shops_load() -> dict:
     if not os.path.exists(SHOPS_FILE):
         return {}
@@ -285,30 +287,67 @@ def _shops_save_atomic(data: dict) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, SHOPS_FILE)
 
-def _set_item(shop: str, item: str, price: Money, stock: int | None) -> None:
-    """
-    Create/update an item. stock=None means unlimited.
-    """
-    data = _shops_load()
-    shop_dict = data.setdefault(shop, {})
-    shop_dict[item] = {"price_knuts": int(price.knuts), "stock": None if stock is None else int(stock)}
-    _shops_save_atomic(data)
-
-def _remove_item(shop: str, item: str) -> bool:
-    data = _shops_load()
-    shop_dict = data.get(shop)
-    if not shop_dict or item not in shop_dict:
-        return False
-    shop_dict.pop(item, None)
-    if not shop_dict:  # clean up empty shop
-        data.pop(shop, None)
-    _shops_save_atomic(data)
-    return True
-
 def _get_item(shop: str, item: str) -> dict | None:
     return _shops_load().get(shop, {}).get(item)
 
-# (Optional) basic autocompletes
+def _set_item_record(shop: str, item: str, price_knuts: int, stock: int | None) -> None:
+    data = _shops_load()
+    shop_dict = data.setdefault(shop, {})
+    shop_dict[item] = {"price_knuts": int(price_knuts), "stock": (None if stock is None else int(stock))}
+    _shops_save_atomic(data)
+
+def _add_stock(shop: str, item: str, price: Money, qty: int) -> tuple[str, dict]:
+    """
+    Create or restock an item.
+    Returns (action, new_record) where action is 'Add' (new) or 'Restock' (existing).
+    Unlimited stock is represented as None; if existing is None, qty has no effect.
+    """
+    if qty <= 0:
+        raise ValueError("Quantity must be positive.")
+    data = _shops_load()
+    shop_dict = data.setdefault(shop, {})
+    rec = shop_dict.get(item)
+    if rec is None:
+        # New item with finite initial stock (defaulted by caller to >=1)
+        rec = {"price_knuts": int(price.knuts), "stock": int(qty)}
+        shop_dict[item] = rec
+        _shops_save_atomic(data)
+        return "Add", rec
+
+    # Existing item: update price (keep latest) and increase stock if finite
+    old_stock = rec.get("stock", 0)
+    rec["price_knuts"] = int(price.knuts)
+    if old_stock is None:
+        # unlimited: leave as unlimited
+        pass
+    else:
+        rec["stock"] = int(old_stock) + int(qty)
+    _shops_save_atomic(data)
+    return "Restock", rec
+
+def _remove_stock(shop: str, item: str, qty: int) -> dict:
+    """
+    Decrease stock by qty (>=1). Errors if item missing or would go below 0.
+    If stock is unlimited (None), we treat removal as not allowed (raises ValueError).
+    Returns the updated record.
+    """
+    if qty <= 0:
+        raise ValueError("Quantity must be positive.")
+    data = _shops_load()
+    shop_dict = data.get(shop) or {}
+    rec = shop_dict.get(item)
+    if rec is None:
+        raise KeyError("Item not found.")
+    if rec.get("stock") is None:
+        raise ValueError("Cannot decrement an item with unlimited stock.")
+    new_stock = int(rec["stock"]) - int(qty)
+    if new_stock < 0:
+        raise ValueError("Removal would make stock negative.")
+    rec["stock"] = new_stock
+    _shops_save_atomic(data)
+    return rec
+
+# (Optional) autocompletes
 from discord import app_commands as _ac
 
 async def _ac_shop_names(_: discord.Interaction, current: str):
@@ -320,9 +359,10 @@ async def _ac_item_names(interaction: discord.Interaction, current: str):
     shop = getattr(interaction.namespace, "shop", None)
     items = []
     if shop:
-        items = sorted(_shops_load().get(shop, {}).keys())
+        items = sorted((_shops_load().get(shop) or {}).keys())
     cur = (current or "").lower()
     return [_ac.Choice(name=i, value=i) for i in items if cur in i.lower()][:25]
+
 
 
 # ---- logging helpers ----
@@ -581,22 +621,28 @@ async def on_message(message: discord.Message):
 
 # ---------------- SHOP COMMANDS (staff-only) ----------------
 
-@bot.tree.command(name="add_item", description="(Staff) Add or update a shop item.")
+@bot.tree.command(name="add_item", description="(Staff) Create or restock an item. Quantity defaults to 1.")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     shop="Shop name (e.g., 'Honeydukes')",
     item="Item name (e.g., 'Chocolate Frog')",
     price="Price (e.g., '2g 5s', '15s', or '300k')",
-    stock="Stock quantity; use negative for unlimited"
+    quantity="How many to add (default 1)"
 )
 async def add_item_cmd(
     interaction: discord.Interaction,
     shop: str,
     item: str,
     price: str,
-    stock: int
+    quantity: int | None = 1
 ):
+    # Validate quantity default
+    qty = int(quantity or 1)
+    if qty <= 0:
+        await interaction.response.send_message("❌ Quantity must be a positive number.", ephemeral=True)
+        return
+
     try:
         money = Money.from_str(price)
     except Exception:
@@ -606,59 +652,81 @@ async def add_item_cmd(
         )
         return
 
-    # Check before/after to decide Add vs Update + log diffs
-    existing = _get_item(shop, item)  # may be None
+    existing = _get_item(shop, item)
     old_price_knuts = existing["price_knuts"] if existing else None
     old_stock = existing["stock"] if existing else None
 
-    # Interpret stock: negative → unlimited; else exact
-    stock_value: int | None = None if stock < 0 else stock
+    try:
+        action, rec = _add_stock(shop, item, money, qty)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
 
-    _set_item(shop, item, money, stock_value)
-
-    stock_text = "∞" if stock_value is None else str(stock_value)
+    stock_text = "∞" if rec.get("stock") is None else str(rec.get("stock"))
     await interaction.response.send_message(
-        f"✅ Set **{item}** in **{shop}** at **{money.pretty_long()}** (stock: {stock_text}).",
+        f"✅ {('Added' if action=='Add' else 'Restocked')} **{item}** in **{shop}** — "
+        f"price **{Money(rec['price_knuts']).pretty_long()}**, stock **{stock_text}**.",
         ephemeral=True
     )
 
+    # Staff log
     await _post_shop_log(
         interaction.guild,
-        "Update" if existing else "Add",
+        "Add" if action == "Add" else "Restock",
         shop,
         item,
         interaction.user if isinstance(interaction.user, discord.Member) else None,
         new_price_knuts=int(money.knuts),
-        new_stock=stock_value,
+        new_stock=rec.get("stock"),
         old_price_knuts=old_price_knuts,
         old_stock=old_stock,
     )
 
+# Autocomplete
+@add_item_cmd.autocomplete("shop")
+async def _ac_add_item_shop(interaction, current: str):
+    return await _ac_shop_names(interaction, current)
 
-@bot.tree.command(name="remove_item", description="(Staff) Remove an item from a shop.")
+
+@bot.tree.command(name="remove_item", description="(Staff) Remove quantity from an item without going below 0.")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     shop="Shop name",
-    item="Item name"
+    item="Item name",
+    quantity="How many to remove (default 1)"
 )
 async def remove_item_cmd(
     interaction: discord.Interaction,
     shop: str,
-    item: str
+    item: str,
+    quantity: int | None = 1
 ):
+    qty = int(quantity or 1)
+    if qty <= 0:
+        await interaction.response.send_message("❌ Quantity must be a positive number.", ephemeral=True)
+        return
+
     existing = _get_item(shop, item)
     if not existing:
         await interaction.response.send_message("❌ Item not found.", ephemeral=True)
         return
 
-    ok = _remove_item(shop, item)
-    if not ok:
+    old_price_knuts = existing.get("price_knuts")
+    old_stock = existing.get("stock")
+
+    try:
+        rec = _remove_stock(shop, item, qty)
+    except ValueError as ve:
+        await interaction.response.send_message(f"❌ {ve}", ephemeral=True)
+        return
+    except KeyError:
         await interaction.response.send_message("❌ Item not found.", ephemeral=True)
         return
 
+    new_stock_text = "∞" if rec.get("stock") is None else str(rec.get("stock"))
     await interaction.response.send_message(
-        f"🗑️ Removed **{item}** from **{shop}**.",
+        f"🗑️ Removed **{qty}** from **{item}** in **{shop}** — new stock **{new_stock_text}**.",
         ephemeral=True
     )
 
@@ -669,17 +737,12 @@ async def remove_item_cmd(
         item,
         interaction.user if isinstance(interaction.user, discord.Member) else None,
         new_price_knuts=None,
-        new_stock=-1,  # not applicable
-        old_price_knuts=existing.get("price_knuts"),
-        old_stock=existing.get("stock"),
+        new_stock=rec.get("stock"),
+        old_price_knuts=old_price_knuts,
+        old_stock=old_stock,
     )
 
-
-# (Optional) wire autocompletes
-@add_item_cmd.autocomplete("shop")
-async def _ac_add_item_shop(interaction, current: str):
-    return await _ac_shop_names(interaction, current)
-
+# Autocompletes
 @remove_item_cmd.autocomplete("shop")
 async def _ac_remove_item_shop(interaction, current: str):
     return await _ac_shop_names(interaction, current)
@@ -687,6 +750,7 @@ async def _ac_remove_item_shop(interaction, current: str):
 @remove_item_cmd.autocomplete("item")
 async def _ac_remove_item_item(interaction, current: str):
     return await _ac_item_names(interaction, current)
+
 
 # --- Staff: withdraw from a character vault ---
 @bot.tree.command(
