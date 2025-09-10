@@ -751,6 +751,68 @@ async def _ac_remove_item_shop(interaction, current: str):
 async def _ac_remove_item_item(interaction, current: str):
     return await _ac_item_names(interaction, current)
 
+@bot.tree.command(name="inventory", description="Check inventory. Show a shop or a specific item.")
+@app_commands.guilds(TEST_GUILD)
+@app_commands.describe(
+    shop="Shop name (optional to list all items in the shop)",
+    item="Item name (optional; requires shop)"
+)
+async def inventory_cmd(
+    interaction: discord.Interaction,
+    shop: str | None = None,
+    item: str | None = None
+):
+    data = _shops_load()
+
+    # No shop: list shops
+    if not shop:
+        if not data:
+            await interaction.response.send_message("No shops configured.", ephemeral=True)
+            return
+        e = discord.Embed(title="Shops", color=discord.Color.blurple())
+        for s in sorted(data.keys()):
+            e.add_field(name=s, value=f"{len(data[s])} item(s)", inline=False)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+        return
+
+    # Shop provided, maybe item
+    shop_items = data.get(shop)
+    if not shop_items:
+        await interaction.response.send_message(f"❌ Shop **{shop}** not found.", ephemeral=True)
+        return
+
+    if item:
+        rec = shop_items.get(item)
+        if not rec:
+            await interaction.response.send_message(f"❌ **{item}** not found in **{shop}**.", ephemeral=True)
+            return
+        price = Money(rec["price_knuts"]).pretty_long()
+        stock_text = "∞" if rec.get("stock") is None else str(rec.get("stock"))
+        e = discord.Embed(title=f"{shop} — {item}", color=discord.Color.green())
+        e.add_field(name="Price", value=price, inline=True)
+        e.add_field(name="Stock", value=stock_text, inline=True)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+        return
+
+    # List all items in the shop
+    e = discord.Embed(title=f"Inventory — {shop}", color=discord.Color.green())
+    if not shop_items:
+        e.description = "_No items._"
+    else:
+        for name, rec in sorted(shop_items.items()):
+            price = Money(rec["price_knuts"]).pretty_long()
+            stock_text = "∞" if rec.get("stock") is None else str(rec.get("stock"))
+            e.add_field(name=name, value=f"Price: {price}\nStock: {stock_text}", inline=False)
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+# Autocompletes
+@inventory_cmd.autocomplete("shop")
+async def _ac_inventory_shop(interaction, current: str):
+    return await _ac_shop_names(interaction, current)
+
+@inventory_cmd.autocomplete("item")
+async def _ac_inventory_item(interaction, current: str):
+    return await _ac_item_names(interaction, current)
 
 # --- Staff: withdraw from a character vault ---
 @bot.tree.command(
