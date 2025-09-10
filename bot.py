@@ -268,6 +268,22 @@ async def _post_shop_log(
         # Avoid crashing command flows if channel perms are missing
         logger.exception("Failed to post shop log embed")
 
+async def _post_inventory_embed(guild: discord.Guild, embed: discord.Embed):
+    """
+    Post an inventory embed to the staff shop log channel, if configured.
+    """
+    if not STAFF_SHOP_LOG_CHANNEL_ID:
+        return
+
+    try:
+        ch = guild.get_channel(STAFF_SHOP_LOG_CHANNEL_ID) or await guild.fetch_channel(STAFF_SHOP_LOG_CHANNEL_ID)
+        if isinstance(ch, (discord.TextChannel, discord.Thread)):
+            await ch.send(embed=embed)
+    except Exception:
+        logger.exception("Failed to post inventory embed")
+
+
+
 # ---------------- SHOP HELPERS (JSON store with stock math) ----------------
 SHOPS_FILE = os.path.join(DATA_DIR, "shops.json")
 
@@ -772,7 +788,8 @@ async def inventory_cmd(
         e = discord.Embed(title="Shops", color=discord.Color.blurple())
         for s in sorted(data.keys()):
             e.add_field(name=s, value=f"{len(data[s])} item(s)", inline=False)
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message("📦 Inventory list posted to staff log.", ephemeral=True)
+        await _post_inventory_embed(interaction.guild, e)
         return
 
     # Shop provided, maybe item
@@ -791,7 +808,8 @@ async def inventory_cmd(
         e = discord.Embed(title=f"{shop} — {item}", color=discord.Color.green())
         e.add_field(name="Price", value=price, inline=True)
         e.add_field(name="Stock", value=stock_text, inline=True)
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message("📦 Item details posted to staff log.", ephemeral=True)
+        await _post_inventory_embed(interaction.guild, e)
         return
 
     # List all items in the shop
@@ -803,7 +821,9 @@ async def inventory_cmd(
             price = Money(rec["price_knuts"]).pretty_long()
             stock_text = "∞" if rec.get("stock") is None else str(rec.get("stock"))
             e.add_field(name=name, value=f"Price: {price}\nStock: {stock_text}", inline=False)
-    await interaction.response.send_message(embed=e, ephemeral=True)
+    await interaction.response.send_message(f"📦 Shop **{shop}** inventory posted to staff log.", ephemeral=True)
+    await _post_inventory_embed(interaction.guild, e)
+
 
 # Autocompletes
 @inventory_cmd.autocomplete("shop")
