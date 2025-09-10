@@ -35,6 +35,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "balances.json")
 PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
 
+# ---------------- DATA DIR / FILES ----------------
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Remove DB_FILE if unused elsewhere
+# DB_FILE = os.path.join(DATA_DIR, "balances.json")
+PENDING_FILE = os.path.join(DATA_DIR, "pending_receipts.json")
+
+# NEW: simple shop storage
+SHOPS_FILE = os.path.join(DATA_DIR, "shops.json")
+
+
 # ---------------- LOGGING ----------------
 import logging, logging.handlers, os, re
 
@@ -187,6 +199,63 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 last_earn_at: dict[tuple[int, str], float] = {}
 
 # ---------------- HELPERS ----------------
+
+# ---------------- SHOP HELPERS (simple JSON store) ----------------
+def _shops_load() -> dict:
+    if not os.path.exists(SHOPS_FILE):
+        return {}
+    try:
+        with open(SHOPS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return {}
+
+def _shops_save_atomic(data: dict) -> None:
+    d = os.path.dirname(SHOPS_FILE) or "."
+    tmp = os.path.join(d, f".tmp_{os.path.basename(SHOPS_FILE)}")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, SHOPS_FILE)
+
+def _set_item(shop: str, item: str, price: Money, stock: int | None) -> None:
+    """
+    Create/update an item. stock=None means unlimited.
+    """
+    data = _shops_load()
+    shop_dict = data.setdefault(shop, {})
+    shop_dict[item] = {"price_knuts": int(price.knuts), "stock": None if stock is None else int(stock)}
+    _shops_save_atomic(data)
+
+def _remove_item(shop: str, item: str) -> bool:
+    data = _shops_load()
+    shop_dict = data.get(shop)
+    if not shop_dict or item not in shop_dict:
+        return False
+    shop_dict.pop(item, None)
+    if not shop_dict:  # clean up empty shop
+        data.pop(shop, None)
+    _shops_save_atomic(data)
+    return True
+
+def _get_item(shop: str, item: str) -> dict | None:
+    return _shops_load().get(shop, {}).get(item)
+
+# (Optional) basic autocompletes
+from discord import app_commands as _ac
+
+async def _ac_shop_names(_: discord.Interaction, current: str):
+    cur = (current or "").lower()
+    names = sorted(_shops_load().keys())
+    return [_ac.Choice(name=s, value=s) for s in names if cur in s.lower()][:25]
+
+async def _ac_item_names(interaction: discord.Interaction, current: str):
+    shop = getattr(interaction.namespace, "shop", None)
+    items = []
+    if shop:
+        items = sorted(_shops_load().get(shop, {}).keys())
+    cur = (current or "").lower()
+    return [_ac.Choice(name=i, value=i) for i in items if cur in i.lower()][:25]
+
 
 # ---- logging helpers ----
 def _msg_ctx(message: discord.Message) -> dict:
@@ -441,6 +510,80 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 # ---------------- SLASH COMMANDS ----------------
+
+# ---------------- SHOP COMMANDS (staff-only) ----------------
+
+@bot.tree.command(name="add_item", description="(Staff) Add or update a shop item.")
+@app_commands.guilds(TEST_GUILD)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    shop="Shop name (e.g., 'Honeydukes')",
+    item="Item name (e.g., 'Chocolate Frog')",
+    price="Price (e.g., '2g 5s', '15s', or '300k')",
+    stock="Stock quantity; use 0 for none, negative for unlimited"
+)
+async def add_item_cmd(
+    interaction: discord.Interaction,
+    shop: str,
+    item: str,
+    price: str,
+    stock: int
+):
+    try:
+        money = Money.from_str(price)
+    except Exception:
+        await interaction.response.send_message(
+            "❌ Price format not recognized. Try `2g 5s`, `15s`, or `300k`.",
+            ephemeral=True
+        )
+        return
+
+    # Interpret stock: negative → unlimited; 0+ → exact amount
+    stock_value: int | None = None if stock < 0 else stock
+
+    _set_item(shop, item, money, stock_value)
+
+    stock_text = "∞" if stock_value is None else str(stock_value)
+    await interaction.response.send_message(
+        f"✅ Set **{item}** in **{shop}** at **{money.pretty_long()}** (stock: {stock_text}).",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="remove_item", description="(Staff) Remove an item from a shop.")
+@app_commands.guilds(TEST_GUILD)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    shop="Shop name",
+    item="Item name"
+)
+async def remove_item_cmd(
+    interaction: discord.Interaction,
+    shop: str,
+    item: str
+):
+    ok = _remove_item(shop, item)
+    if not ok:
+        await interaction.response.send_message("❌ Item not found.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"🗑️ Removed **{item}** from **{shop}**.",
+        ephemeral=True
+    )
+
+# (Optional) wire autocompletes
+@add_item_cmd.autocomplete("shop")
+async def _ac_add_item_shop(interaction, current: str):
+    return await _ac_shop_names(interaction, current)
+
+@remove_item_cmd.autocomplete("shop")
+async def _ac_remove_item_shop(interaction, current: str):
+    return await _ac_shop_names(interaction, current)
+
+@remove_item_cmd.autocomplete("item")
+async def _ac_remove_item_item(interaction, current: str):
+    return await _ac_item_names(interaction, current)
+
 # --- Staff: withdraw from a character vault ---
 @bot.tree.command(
     name="vault_withdraw",
