@@ -1,7 +1,8 @@
 # bot.py
 import os
 from dotenv import load_dotenv
-load_dotenv()  # loads variables from .env into process env
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=True)
 
 import time
 import discord
@@ -116,9 +117,17 @@ setup_logging()
 logger = logging.getLogger("gringotts")
 
 # ---------------- CONFIG ----------------
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
+
+# If someone pasted "Bot <token>", fix it:
+if TOKEN.lower().startswith("bot "):
+    TOKEN = TOKEN.split(" ", 1)[1].strip()
+
+# Sanity checks (safe: masked)
 if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN env var not set.")
+    raise RuntimeError("DISCORD_BOT_TOKEN is missing. Check your .env and load_dotenv(...).")
+if len(TOKEN) < 50 or "." not in TOKEN:
+    raise RuntimeError("DISCORD_BOT_TOKEN looks malformed. Make sure you copied the Bot Token from the Bot tab.")
 
 # Your server (guild-only sync = instant command availability)
 TEST_GUILD_ID = 1414423359118376974
