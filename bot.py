@@ -21,7 +21,6 @@ from bank import (
     get_balance, set_balance, add_balance, subtract_if_enough,
     top_users, top_characters,
 )
-from shop import list_items, get_price
 from links import (
     link_character, unlink_character, resolve_character,
     all_links, normalize_display_name,
@@ -41,18 +40,18 @@ import logging, logging.handlers, os, re
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE  = os.getenv("LOG_FILE", "bot.log")
 
-# Optional: silence a noisy webhook by ID or name (Wizarding Cards example)
-SILENCE_WEBHOOK_IDS = {1130656856990289961}  # add/remove as needed
-SILENCE_WEBHOOK_NAMES = {"Wizarding Cards"}  # exact webhook author display name
-
 _WEBHOOK_ID_RE = re.compile(r"\bwebhook_id=(\d{5,})\b")
 _AUTHOR_RE     = re.compile(r"author='([^']+)'")  # matches our earn_trace author='...'
 
 class WebhookNoiseFilter(logging.Filter):
     """
-    Drop only *our* records that explicitly mention a silenced webhook id or author.
-    We look for 'webhook_id=<id>' and "author='Name'" tokens to avoid substring accidents.
+    Optional filter that can drop our own records if they mention specific webhook ids or authors.
+    Currently inactive (no ids/names configured) and safe to leave in place.
     """
+    # Empty sets: no silencing configured
+    SILENCE_WEBHOOK_IDS: set[int] = set()
+    SILENCE_WEBHOOK_NAMES: set[str] = set()
+
     def filter(self, record: logging.LogRecord) -> bool:
         # Only filter our app logger; never touch discord or root logs.
         if not record.name.startswith("gringotts"):
@@ -65,14 +64,14 @@ class WebhookNoiseFilter(logging.Filter):
         if m:
             try:
                 wid = int(m.group(1))
-                if wid in SILENCE_WEBHOOK_IDS:
+                if wid in self.SILENCE_WEBHOOK_IDS:
                     return False
             except ValueError:
                 pass
 
         # Match explicit author token
         m2 = _AUTHOR_RE.search(msg)
-        if m2 and m2.group(1) in SILENCE_WEBHOOK_NAMES:
+        if m2 and m2.group(1) in self.SILENCE_WEBHOOK_NAMES:
             return False
 
         return True
@@ -122,34 +121,20 @@ if not TOKEN:
     raise RuntimeError("DISCORD_BOT_TOKEN env var not set.")
 
 # Your server (guild-only sync = instant command availability)
-TEST_GUILD_ID = 1393623189241991168
+TEST_GUILD_ID = 1414423359118376974
 TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 
 # Channels where messages earn money (include forum PARENT channel IDs)
 ALLOWED_CHANNEL_IDS: set[int] = {
-    1398762545430401155, # Events
-    1411901315185119252, # Witch's Market (Forum parent or specific thread)
-    1393688264531247277, # Hogwarts Grounds
-    1393683936009257141, # Hogwarts Castle
-    1393687041212153886, # Slytherin Common Room
-    1393685488338210917, # Gryffindor Common Room
-    1393687315162857493, # Ravenclaw Common Room
-    1393687608684580874, # Hufflepuff Common Room
-    1393689121666502666, # Hogsmeade Village
-    1411841740654248046, # Diagon Alley
-    1411841810371711037, # Knockturn Alley
-    1407084037843189882, # The Highlands
-    1393690088835125330, # Wizarding London
-    1409802777126768640, # Elsewhere
-    1406803659202887862, # Chaos Testing Center
-}
-
-# OPTIONAL IGNORE LISTS FOR WEBHOOKS (utility bots etc.)
-IGNORED_WEBHOOK_IDS: set[int] = {
-    1130656856990289961,  # Wizarding Cards
-}
-IGNORED_WEBHOOK_NAMES: set[str] = {
-    "Wizarding Cards",
+    1414423363056701462, # Events
+    1414423364440821799, # Gryffindor Territory
+    1414423364612784190, # Hufflepuff Territory
+    1414423364612784193, # Ravenclaw Territory
+    1414423364612784196, # Slytherin Territory
+    1414423365812355203, # Neutral Territory
+    1414423365812355198, # Police and Ministry
+    1414423364944138265, # Diagon Alley
+    1414423365430804520, # Knockturn Alley
 }
 
 # Bypass per-character cooldown in channels where debug is enabled (handy for testing)
@@ -175,41 +160,13 @@ def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) ->
 
 
 # Channels for Gringotts Bank
-GRINGOTTS_FORUM_ID = 1393690306410450975  # test forum ID
+GRINGOTTS_FORUM_ID = 1414423364944138266  # test forum ID
 
 EARN_PER_MESSAGE = Money.from_str("7k")     # payout per qualifying message
 EARN_COOLDOWN_SECONDS = 15                  # cooldown PER CHARACTER
 MIN_MESSAGE_LENGTH = 500                    # minimum characters to count
 
-# Weekly pay (currently user-level, not per-character)
-ADULT_ROLE_NAME = "Adult"
-BASE_WEEKLY_PAY = Money.from_str("1g")
-JOB_BONUSES: dict[str, Money] = {
-    # "Professor": Money.from_str("2g"),
-    # "Shopkeeper": Money.from_str("1g 10s"),
-}
-
 STARTER_FUNDS = Money.from_str("50g")   # starting balance for a newly linked character
-
-# ---------------- DEBUG (targeted, low-noise) ----------------
-# Set DEBUG_EARN_ALL=1 in env to trace decisions in ALL channels/threads temporarily.
-DEBUG_EARN_ALL = os.getenv("DEBUG_EARN_ALL", "0") == "1"
-
-# Track channels/threads where we want deep diagnostics (toggle with /debug_toggle).
-# Track channels/threads where we want deep diagnostics:
-DEBUG_EARNING_CHANNEL_IDS: set[int] = set()  # must be set(), not {}
-
-def _debug_enabled_for_channel(ch: discord.abc.GuildChannel | discord.Thread) -> bool:
-    if os.getenv("DEBUG_EARN_ALL", "0") == "1":
-        return True
-    parent = getattr(ch, "parent", None)
-    candidates = {
-        getattr(ch, "id", None),
-        getattr(ch, "parent_id", None),
-        getattr(parent, "id", None) if parent else None,
-    }
-    return any(cid and cid in DEBUG_EARNING_CHANNEL_IDS for cid in candidates)
-
 
 # ---------------- BOT SETUP ----------------
 intents = discord.Intents.default()
@@ -408,16 +365,6 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Optional: hard-ignore utility webhooks
-    if message.webhook_id in IGNORED_WEBHOOK_IDS or (message.author.name or "") in IGNORED_WEBHOOK_NAMES:
-        if dbg:
-            logger.info(
-                "debug:earn_skip reason='ignored_webhook' | "
-                f"webhook_id={message.webhook_id} author='{message.author.name}'"
-            )
-        await bot.process_commands(message)
-        return
-
     # Channel allowlist
     allowed, ch_details = is_earning_channel_with_details(message.channel)
     if not allowed:
@@ -483,8 +430,6 @@ async def on_message(message: discord.Message):
         )
 
     await bot.process_commands(message)
-
-
 
 # ---------------- SLASH COMMANDS ----------------
 # --- Staff: withdraw from a character vault ---
@@ -585,7 +530,6 @@ async def debug_status_cmd(interaction: discord.Interaction):
         f"- LOG_LEVEL: `{os.getenv('LOG_LEVEL', 'INFO')}`\n",
         ephemeral=True
     )
-
 
 @bot.tree.command(name="debug_channel", description="(Staff) Explain why this channel/thread is or isn't allowed for RP earnings.")
 @app_commands.guilds(TEST_GUILD)
@@ -718,202 +662,6 @@ async def who_is_cmd(interaction: discord.Interaction, name: str):
     else:
         await interaction.response.send_message(f"**{name}** is not linked to anyone.", ephemeral=True)
 
-# Shop (per-character)
-@bot.tree.command(name="shop", description="Browse and buy items by town and shop.")
-@app_commands.guilds(TEST_GUILD)
-@app_commands.describe(
-    action="Pick: towns | shops | list | buy",
-    town="Town name: Diagon Alley, Knockturn Alley, Hogsmeade",
-    shop="Shop name within the town",
-    item="Item name to buy",
-    quantity="How many to buy",
-    character="Character wallet to spend from"
-)
-async def shop_cmd(
-    interaction: discord.Interaction,
-    action: str,
-    town: str | None = None,
-    shop: str | None = None,
-    item: str | None = None,
-    quantity: int | None = 1,
-    character: str | None = None
-):
-    from shop import list_towns, list_shops, list_items, buy_item, get_price
-
-    action = (action or "").lower().strip()
-
-    # towns
-    if action == "towns":
-        towns = list_towns()
-        e = discord.Embed(title="Towns", color=discord.Color.blurple())
-        if towns:
-            for t in towns:
-                e.add_field(name=t, value="—", inline=False)
-        else:
-            e.description = "_No towns configured yet._"
-        await interaction.response.send_message(embed=e)
-        return
-
-    # shops in a town
-    if action == "shops":
-        if not town:
-            await interaction.response.send_message("Provide `town`.", ephemeral=True)
-            return
-        shops = list_shops(town)
-        e = discord.Embed(title=f"Shops in {town}", color=discord.Color.blurple())
-        if shops:
-            for s in shops:
-                e.add_field(name=s, value="—", inline=False)
-        else:
-            e.description = "_No shops found._"
-        await interaction.response.send_message(embed=e)
-        return
-
-    # list items in shop (now as embeds)
-    if action == "list":
-        if not (town and shop):
-            await interaction.response.send_message("Provide `town` and `shop`.", ephemeral=True)
-            return
-        items = list_items(town, shop)  # -> [(name, Money, qty|None), ...]
-        embeds = _shop_embeds(town, shop, items)
-
-        if len(embeds) == 1:
-            await interaction.response.send_message(embed=embeds[0])
-        else:
-            await interaction.response.send_message(embed=embeds[0])
-            for e in embeds[1:]:
-                await interaction.followup.send(embed=e)
-        return
-
-    # buy
-    if action == "buy":
-        if not (town and shop and item and character):
-            await interaction.response.send_message("Provide `town`, `shop`, `item`, and `character`.", ephemeral=True)
-            return
-
-        uid = resolve_character(character)
-        if not uid:
-            await interaction.response.send_message(f"❌ No link for **{character}**.", ephemeral=True)
-            return
-        if uid != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You can only spend from your own character’s wallet.", ephemeral=True)
-            return
-
-        key = normalize_display_name(character)
-        qty = max(1, quantity or 1)
-
-        # Check price & stock first
-        price = get_price(town, shop, item)
-        if not price:
-            await interaction.response.send_message(f"❌ **{item}** not found in **{shop}**.", ephemeral=True)
-            return
-        total = price * qty
-
-        # Ensure player has funds before we decrement shop stock
-        if not subtract_if_enough(uid, total, key=key):
-            bal = get_balance(uid, key=key)
-            await interaction.response.send_message(
-                f"❌ Not enough funds. Price: **{total.pretty_long()}**, {character} balance: **{bal.pretty_long()}**",
-                ephemeral=True
-            )
-            return
-
-        # Try to decrement stock atomically
-        from shop import buy_item as stock_buy
-        charged = stock_buy(town, shop, item, qty)
-        if charged is None:
-            # refund if stock failed
-            add_balance(uid, total, key=key)
-            await interaction.response.send_message(
-                f"❌ **{item}** is out of stock (requested {qty}).", ephemeral=True
-            )
-            return
-
-        # Post receipt & confirm
-        await post_receipt(
-            bot, interaction.guild, uid, key,
-            delta=Money(knuts=-charged.knuts),  # negative for withdrawal receipt display
-            new_balance=get_balance(uid, key=key),
-            reason=f"Shop: {item} ×{qty} @ {shop}, {town}"
-        )
-        await interaction.response.send_message(
-            f"🧾 **{character}** bought **{qty}× {item}** from **{shop}** (*{town}*) for **{total.pretty_long()}**."
-        )
-        return
-
-    await interaction.response.send_message(
-        "Actions: `towns`, `shops`, `list`, `buy`.", ephemeral=True
-    )
-
-# --- Staff: add or change an item ---
-@bot.tree.command(name="shop_set", description="(Staff) Create or update an item in a shop.")
-@app_commands.guilds(TEST_GUILD)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    town="Town (e.g., Diagon Alley)",
-    shop="Shop (e.g., Ollivanders)",
-    item="Item name",
-    price="e.g., 2g 5s or 30s",
-    qty="Stock quantity (omit for unlimited)"
-)
-async def shop_set_cmd(interaction: discord.Interaction, town: str, shop: str, item: str, price: str, qty: int | None = None):
-    from shop import set_item
-    try:
-        money = Money.from_str(price)
-    except Exception:
-        await interaction.response.send_message("❌ Price format not recognized. Try `2g 5s` or `30s`.", ephemeral=True)
-        return
-    set_item(town, shop, item, money, qty)
-    stock_text = "∞" if qty is None else str(qty)
-    await interaction.response.send_message(
-        f"✅ Set **{item}** in **{shop}** (*{town}*) at **{money.pretty_long()}** (stock: {stock_text}).",
-        ephemeral=True
-    )
-
-# --- Staff: restock ---
-@bot.tree.command(name="shop_restock", description="(Staff) Adjust stock by delta (use negative to reduce).")
-@app_commands.guilds(TEST_GUILD)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(town="Town", shop="Shop", item="Item name", delta="Change in quantity (e.g., 10 or -3)")
-async def shop_restock_cmd(interaction: discord.Interaction, town: str, shop: str, item: str, delta: int):
-    from shop import restock_item
-    ok = restock_item(town, shop, item, delta)
-    if not ok:
-        await interaction.response.send_message("❌ Item not found.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"🔧 Stock updated for **{item}** in **{shop}** (*{town}*).", ephemeral=True)
-
-# --- Staff: change price ---
-@bot.tree.command(name="shop_price", description="(Staff) Change an item's price.")
-@app_commands.guilds(TEST_GUILD)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(town="Town", shop="Shop", item="Item name", price="New price, e.g., 1g 10s")
-async def shop_price_cmd(interaction: discord.Interaction, town: str, shop: str, item: str, price: str):
-    from shop import set_price
-    try:
-        money = Money.from_str(price)
-    except Exception:
-        await interaction.response.send_message("❌ Price format not recognized.", ephemeral=True)
-        return
-    ok = set_price(town, shop, item, money)
-    if not ok:
-        await interaction.response.send_message("❌ Item not found.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"💲 Price updated for **{item}** in **{shop}** (*{town}*): {money.pretty_long()}", ephemeral=True)
-
-# --- Staff: remove item ---
-@bot.tree.command(name="shop_remove", description="(Staff) Remove an item from a shop.")
-@app_commands.guilds(TEST_GUILD)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(town="Town", shop="Shop", item="Item name")
-async def shop_remove_cmd(interaction: discord.Interaction, town: str, shop: str, item: str):
-    from shop import remove_item
-    ok = remove_item(town, shop, item)
-    if not ok:
-        await interaction.response.send_message("❌ Item not found.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"🗑️ Removed **{item}** from **{shop}** (*{town}*).", ephemeral=True)
-
 # Leaderboards
 @bot.tree.command(name="leaderboard", description="Top balances (user totals or character wallets).")
 @app_commands.guilds(TEST_GUILD)
@@ -991,7 +739,6 @@ async def award_character_cmd(
         f"✅ Awarded **{money.pretty_long()}** to **{character}**. Note: _{reason}_",
         ephemeral=True
     )
-
 
 # Creates a Vault
 @bot.tree.command(name="vault_create", description="Create a Gringotts Vault thread for a character.")
@@ -1193,14 +940,10 @@ async def tip_cmd(interaction: discord.Interaction, from_character: str, to_char
     )
 
 # ---------------- HELP (slash) ----------------
-class HelpSection(app_commands.Transform):
-    pass
-
 HELP_CHOICES = [
     app_commands.Choice(name="All", value="all"),
     app_commands.Choice(name="Linking Characters", value="linking"),
     app_commands.Choice(name="Vault", value="vault"),
-    app_commands.Choice(name="Shopping", value="shopping"),
 ]
 
 def _help_embed_linking() -> discord.Embed:
@@ -1250,50 +993,13 @@ def _help_embed_vault() -> discord.Embed:
         name="How receipts work",
         value=(
             "• **RP earnings** are **batched**: the bot credits immediately but posts a **daily summary at 00:05 UTC**.\n"
-            "• **Shop purchases**, **tips**, and **staff awards** post receipts immediately."
+            "• **Tips**, **staff awards**, and **manual vault withdrawals** post receipts immediately."
         ),
         inline=False,
     )
     return e
 
-def _help_embed_shopping() -> discord.Embed:
-    e = discord.Embed(
-        title="Shops & Inventory",
-        description=("Browse towns/shops, check stock & prices, and buy items with a character wallet."),
-        color=discord.Color.green(),
-    )
-    e.add_field(
-        name="Player Commands",
-        value=(
-            "• `/shop action:towns`\n"
-            "• `/shop action:shops town:\"Hogsmeade\"`\n"
-            "• `/shop action:list town:\"Hogsmeade\" shop:\"Honeydukes\"`\n"
-            "• `/shop action:buy town:\"…\" shop:\"…\" item:\"…\" quantity:1 character:\"Your Char\"`"
-        ),
-        inline=False,
-    )
-    e.add_field(
-        name="Staff (Manage Server) Commands",
-        value=(
-            "• `/shop_set town:\"…\" shop:\"…\" item:\"…\" price:\"2g 5s\" qty:10`\n"
-            "• `/shop_price town:\"…\" shop:\"…\" item:\"…\" price:\"…\"`\n"
-            "• `/shop_restock town:\"…\" shop:\"…\" item:\"…\" delta:10`\n"
-            "• `/shop_remove town:\"…\" shop:\"…\"`"
-        ),
-        inline=False,
-    )
-    e.add_field(
-        name="Notes",
-        value=(
-            "• Purchases withdraw from the **selected character** only.\n"
-            "• If stock fails during a buy, the bot **refunds automatically**.\n"
-            "• Prices use the canon conversion: `1 galleon = 17 sickles = 493 knuts`."
-        ),
-        inline=False,
-    )
-    return e
-
-@bot.tree.command(name="help", description="How to use the bot (linking, vault, shopping).")
+@bot.tree.command(name="help", description="How to use the bot (linking & vault).")
 @app_commands.guilds(TEST_GUILD)
 @app_commands.describe(section="Pick a section or 'All'")
 @app_commands.choices(section=HELP_CHOICES)
@@ -1304,8 +1010,6 @@ async def help_cmd(interaction: discord.Interaction, section: app_commands.Choic
         embeds.append(_help_embed_linking())
     if sel in ("all", "vault"):
         embeds.append(_help_embed_vault())
-    if sel in ("all", "shopping"):
-        embeds.append(_help_embed_shopping())
 
     if not embeds:
         await interaction.response.send_message("No help available.", ephemeral=True)
@@ -1316,6 +1020,11 @@ async def help_cmd(interaction: discord.Interaction, section: app_commands.Choic
         await interaction.followup.send(embed=e, ephemeral=True)
 
 # ---------------- WEEKLY PAYDAY ----------------
+# NOTE: These constants must exist somewhere in your codebase or env. If not, define them or remove payday.
+ADULT_ROLE_NAME = os.getenv("ADULT_ROLE_NAME", "Adult")  # placeholder default
+BASE_WEEKLY_PAY = Money.from_str(os.getenv("BASE_WEEKLY_PAY", "0k"))
+JOB_BONUSES = {}  # role name -> Money
+
 @tasks.loop(hours=168)  # weekly
 async def weekly_payday():
     for guild in bot.guilds:
@@ -1388,92 +1097,6 @@ async def flush_daily_receipts():
     data.pop(prev_day, None)
     _pending_save_atomic(data)
     logger.info(f"flush:completed day={prev_day} posted_receipts={flush_count}")
-
-# ---- Autocomplete helpers for /shop and staff cmds ----
-from discord import app_commands as _ac
-from shop import list_towns as _list_towns, list_shops as _list_shops, list_items as _list_items
-
-async def _ac_towns(_: discord.Interaction, current: str):
-    cur = (current or "").lower()
-    return [_ac.Choice(name=t, value=t) for t in _list_towns() if cur in t.lower()][:25]
-
-async def _ac_shops(interaction: discord.Interaction, current: str):
-    town = None
-    try:
-        town = interaction.namespace.town
-    except Exception:
-        pass
-    shops = _list_shops(town) if town else []
-    cur = (current or "").lower()
-    return [_ac.Choice(name=s, value=s) for s in shops if cur in s.lower()][:25]
-
-async def _ac_items(interaction: discord.Interaction, current: str):
-    town = getattr(interaction.namespace, "town", None)
-    shop = getattr(interaction.namespace, "shop", None)
-    items = _list_items(town, shop) if (town and shop) else []
-    cur = (current or "").lower()
-    names = [n for (n, _p, _q) in items]
-    return [_ac.Choice(name=n, value=n) for n in names if cur in n.lower()][:25]
-
-@shop_cmd.autocomplete("town")
-async def _ac_shop_town(interaction, current: str):
-    return await _ac_towns(interaction, current)
-
-@shop_cmd.autocomplete("shop")
-async def _ac_shop_shop(interaction, current: str):
-    return await _ac_shops(interaction, current)
-
-@shop_cmd.autocomplete("item")
-async def _ac_shop_item(interaction, current: str):
-    return await _ac_items(interaction, current)
-
-@shop_set_cmd.autocomplete("town")
-async def _ac_set_town(interaction, current: str):
-    return await _ac_towns(interaction, current)
-
-@shop_set_cmd.autocomplete("shop")
-async def _ac_set_shop(interaction, current: str):
-    return await _ac_shops(interaction, current)
-
-@shop_set_cmd.autocomplete("item")
-async def _ac_set_item(interaction, current: str):
-    return await _ac_items(interaction, current)
-
-@shop_restock_cmd.autocomplete("town")
-async def _ac_restock_town(interaction, current: str):
-    return await _ac_towns(interaction, current)
-
-@shop_restock_cmd.autocomplete("shop")
-async def _ac_restock_shop(interaction, current: str):
-    return await _ac_shops(interaction, current)
-
-@shop_restock_cmd.autocomplete("item")
-async def _ac_restock_item(interaction, current: str):
-    return await _ac_items(interaction, current)
-
-@shop_price_cmd.autocomplete("town")
-async def _ac_price_town(interaction, current: str):
-    return await _ac_towns(interaction, current)
-
-@shop_price_cmd.autocomplete("shop")
-async def _ac_price_shop(interaction, current: str):
-    return await _ac_shops(interaction, current)
-
-@shop_price_cmd.autocomplete("item")
-async def _ac_price_item(interaction, current: str):
-    return await _ac_items(interaction, current)
-
-@shop_remove_cmd.autocomplete("town")
-async def _ac_remove_town(interaction, current: str):
-    return await _ac_towns(interaction, current)
-
-@shop_remove_cmd.autocomplete("shop")
-async def _ac_remove_shop(interaction, current: str):
-    return await _ac_shops(interaction, current)
-
-@shop_remove_cmd.autocomplete("item")
-async def _ac_remove_item(interaction, current: str):
-    return await _ac_items(interaction, current)
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
